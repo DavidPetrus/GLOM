@@ -1,13 +1,17 @@
 import numpy as np
 import cv2
 import torch
+import glob
 
 from glom import GLOM
+from dataloader import Dataset
 
 from absl import flags
 
 FLAGS = flags.FLAGS
 
+flags.DEFINE_integer('batch_size', 1, '')
+flags.DEFINE_integer('num_workers', 8, '')
 flags.DEFINE_integer('min_crop_size',8,'Minimum size of cropped region')
 flags.DEFINE_integer('max_crop_size',24,'Maximum size of cropped region')
 flags.DEFINE_float('masked_fraction',0.2,'Fraction of input image that is masked')
@@ -24,7 +28,15 @@ flags.DEFINE_integer('input_cnn_depth',3,'Number of convolutional layers for inp
 flags.DEFINE_integer('num_reconst',3,'Number of layers for reconstruction CNN')
 
 
+train_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/training/*/*/*.jpg")
+val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
 
+
+training_set = Dataset(train_images)
+training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+
+validation_set = Dataset(val_images)
+validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
 
 optimizer = torch.optim.Adam(lr=FLAGS.lr)
@@ -34,19 +46,13 @@ model = GLOM(num_levels=FLAGS.num_levels, min_emb_size=FLAGS.min_emb_size, patch
 
 loss_func = torch.nn.MSELoss()
 
-# Create dataloader
-dataloader = None
-
 train_iter = 0
-for image in dataloader:
+for masked_image, target_image in training_generator:
     # Set optimzer gradients to zero
     optimizer.zero_grad()
 
-    masked_image = mask_random_crop(image)
     reconstructed_image, bottom_up_loss, top_down_loss = model(masked_image)
-
-    reconstruction_loss = loss_func(image,reconstructed_image)
-
+    reconstruction_loss = loss_func(target_image,reconstructed_image)
     final_loss = reconstruction_loss + FLAGS.reg_coeff*(bottom_up_loss+top_down_loss)
 
     # Calculate gradients of the weights
