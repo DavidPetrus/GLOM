@@ -23,6 +23,7 @@ class GLOM(nn.Module):
         self.min_emb_size = min_emb_size
         self.max_emb_size = (self.max_patch_size/self.min_patch_size)*min_emb_size
 
+        self.strides = [2 if l < np.log2(self.max_patch_size/self.min_patch_size) else 1 for l in range(self.num_levels)]
         self.level_res = [min(self.min_patch_size  * 2**l, self.max_patch_size) for l in range(num_levels)]
         self.embd_dims = [min(min_emb_size * 2**l, self.max_emb_size) for l in range(num_levels)]
 
@@ -57,7 +58,7 @@ class GLOM(nn.Module):
         # A seperate encoder (bottom-up net) is used for each level and shared among locations within each level (hence the use of 1x1 convolutions 
         # since it makes the implementation easier).
         encoder_layers = []
-        encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],kernel_size=2,stride=2)))
+        encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],kernel_size=2,stride=self.strides[level])))
         encoder_layers.append(('enc_act{}_0'.format(level), nn.Hardswish(inplace=True)))
         for layer in range(1,self.bottom_up_layers):
             encoder_layers.append(('enc_lev{}_{}'.format(level,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
@@ -89,7 +90,8 @@ class GLOM(nn.Module):
             cnn_layers['cnn_act_inp{}'.format(l)] = nn.Hardswish(inplace=True)
 
         for l in range(self.num_input_layers, self.num_input_layers+self.num_levels):
-            cnn_layers['cnn_conv_lev{}'.format(l)] = nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)
+            cnn_layers['cnn_conv_lev{}'.format(l)] = nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,
+                stride=self.strides[l-self.num_input_layers],padding=1)
             cnn_layers['cnn_act_lev{}'.format(l)] = nn.Hardswish(inplace=True)
 
         return nn.ModuleDict(cnn_layers)
@@ -112,6 +114,7 @@ class GLOM(nn.Module):
             reconst_layers.append(('reconst_dense{}'.format(l): nn.ConvTranspose2d(reconst_chans[l],reconst_chans[l+1],kernel_size=3,stride=2)))
             if l < self.num_input_layers-1:
                 cnn_layers.append(('reconst_act{}'.format(l): nn.Hardswish(inplace=True)))
+                
         return nn.Sequential(OrderedDict(cnn_layers))
 
     def generate_positional_encoding(self, height, width):
@@ -136,7 +139,11 @@ class GLOM(nn.Module):
         # Positional encoding  is concatenated to the embedding at level L before being passed through the Top-Down net
         # and used to predict the embedding at level L-1 
         batch_size,h,w,embd_size = embeddings.shape
-        rep_embds = torch.repeat_interleave(torch.repeat_interleave(embeddings,2,dim=2),2,dim=1)
+        if self.strides[level] == 2:
+            rep_embds = torch.repeat_interleave(torch.repeat_interleave(embeddings,2,dim=2),2,dim=1)
+        else:
+            rep_embds = embeddings
+
         height_pos,width_pos = self.generate_positional_encoding(rep_embds.shape[1],rep_embds.shape[2])
         cat_embds = torch.cat([rep_embds,height_pos.tile((1,1,rep_embds.shape[2],1)),width_pos.tile((1,rep_embds.shape[1],1,1))],dim=3)
         
