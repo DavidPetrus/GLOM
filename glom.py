@@ -63,6 +63,7 @@ class GLOM(nn.Module):
         for layer in range(1,self.bottom_up_layers):
             encoder_layers.append(('enc_lev{}_{}'.format(level,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
             encoder_layers.append(('enc_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
+
         return nn.Sequential(OrderedDict(encoder_layers))
 
     def decoder(self,level):
@@ -107,14 +108,14 @@ class GLOM(nn.Module):
         return level_embds
 
     def build_reconstruction_net(self):
-        # CNN used to reconstruct the input image (and the missing pixels) using the embeddings from all the levels.
-        reconst_chans = [128,64,32,3]
+        # CNN used to reconstruct the input image (and the missing pixels) using the embeddings from the bottom level.
+        reconst_chans = [64,128,256,192]
         reconst_layers = []
         for l in range(self.num_reconst):
-            reconst_layers.append(('reconst_dense{}'.format(l): nn.ConvTranspose2d(reconst_chans[l],reconst_chans[l+1],kernel_size=3,stride=2)))
-            if l < self.num_input_layers-1:
+            reconst_layers.append(('reconst_dense{}'.format(l): nn.Conv2d(reconst_chans[l],reconst_chans[l+1],kernel_size=1,stride=1)))
+            if l < self.num_reconst-1:
                 cnn_layers.append(('reconst_act{}'.format(l): nn.Hardswish(inplace=True)))
-                
+
         return nn.Sequential(OrderedDict(cnn_layers))
 
     def generate_positional_encoding(self, height, width):
@@ -201,6 +202,7 @@ class GLOM(nn.Module):
         return level_embds, level_deltas, bu_loss, td_loss
 
     def forward(self,img):
+        batch_size,height,width,_ = img.shape
         level_embds = self.forward_cnn(img)
         total_bu_loss, total_td_loss = 0.,0.
         # Keep on updating embeddings until they settle on constant value.
@@ -211,7 +213,9 @@ class GLOM(nn.Module):
             if sum(deltas).sum() < self.delta_thresh:
                 break
 
-        reconst_img = self.reconstruction_net(level_embds)
+        reconst_img = self.reconstruction_net(level_embds) # N,192,32,32
+        _,_,map_h,map_w = reconst_img.shape
+        reconst_img = reconst_img.moveaxis(1,3).view(batch_size,map_h,map_w,8,8,3).swapdims(2,3).view(batch_size,map_h*8,map_w*8,3)
         return reconst_img, total_bu_loss, total_td_loss
 
 
