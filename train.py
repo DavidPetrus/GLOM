@@ -6,7 +6,7 @@ import glob
 from glom import GLOM
 from dataloader import Dataset
 
-from absl import flags
+from absl import flags, app
 
 FLAGS = flags.FLAGS
 
@@ -28,38 +28,45 @@ flags.DEFINE_integer('input_cnn_depth',3,'Number of convolutional layers for inp
 flags.DEFINE_integer('num_reconst',3,'Number of layers for reconstruction CNN')
 
 
-train_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/training/*/*/*.jpg")
-val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
+def main(argv):
+
+    train_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/training/*/*/*.jpg")
+    val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
 
 
-training_set = Dataset(train_images)
-training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+    training_set = Dataset(train_images)
+    training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
-validation_set = Dataset(val_images)
-validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+    validation_set = Dataset(val_images)
+    validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
 
-optimizer = torch.optim.Adam(lr=FLAGS.lr)
+    optimizer = torch.optim.Adam(lr=FLAGS.lr)
 
-model = GLOM(num_levels=FLAGS.num_levels, min_emb_size=FLAGS.min_emb_size, patch_size=(FLAGS.min_patch_size,FLAGS.max_patch_size), bottom_up_layers=FLAGS.bottom_up_layers, 
-            top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
+    model = GLOM(num_levels=FLAGS.num_levels, min_emb_size=FLAGS.min_emb_size, patch_size=(FLAGS.min_patch_size,FLAGS.max_patch_size), bottom_up_layers=FLAGS.bottom_up_layers, 
+                top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
-loss_func = torch.nn.MSELoss()
+    loss_func = torch.nn.MSELoss()
 
-train_iter = 0
-for masked_image, target_image in training_generator:
-    # Set optimzer gradients to zero
-    optimizer.zero_grad()
+    train_iter = 0
+    for masked_image, target_image in training_generator:
+        # Set optimzer gradients to zero
+        optimizer.zero_grad()
 
-    reconstructed_image, bottom_up_loss, top_down_loss = model(masked_image)
-    reconstruction_loss = loss_func(target_image,reconstructed_image)
-    final_loss = reconstruction_loss + FLAGS.reg_coeff*(bottom_up_loss+top_down_loss)
+        reconstructed_image, bottom_up_loss, top_down_loss = model(masked_image)
+        reconstruction_loss = loss_func(target_image,reconstructed_image)
+        final_loss = reconstruction_loss + FLAGS.reg_coeff*(bottom_up_loss+top_down_loss)
 
-    # Calculate gradients of the weights
-    final_loss.backward()
+        # Calculate gradients of the weights
+        final_loss.backward()
 
-    # Update the weights
-    optimizer.step()
+        # Update the weights
+        optimizer.step()
 
-    train_iter += 1
+        train_iter += 1
 
+
+
+if __name__ == '__main__':
+    torch.multiprocessing.set_start_method('spawn', force=True)
+    app.run(main)
