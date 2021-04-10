@@ -1,4 +1,4 @@
-import numpy np
+import numpy as np
 from collections import OrderedDict
 import torch
 import torch.nn as nn
@@ -15,13 +15,17 @@ class Sine(nn.Module):
 
 class GLOM(nn.Module):
 
-    def __init__(self, num_levels=5, emb_size=64, patch_size=8, bottom_up_layers=3, top_down_layers=3, num_input_layers=2, num_reconst=3):
+    def __init__(self, num_levels=5, min_emb_size=64, patch_size=(8,32), bottom_up_layers=3, top_down_layers=3, num_input_layers=3, num_reconst=3):
 
         self.num_levels = num_levels
-        self.emb_size = emb_size
-        self.patch_size = patch_size
-        self.level_res = [patch_size * 2**l for l in range(num_levels)]
-        self.level_embds = [emb_size * 2**l for l in range(num_levels)]
+        self.min_patch_size = patch_size[0]
+        self.max_patch_size = patch_size[1]
+        self.min_emb_size = min_emb_size
+        self.max_emb_size = (self.max_patch_size/self.min_patch_size)*min_emb_size
+
+        self.level_res = [min(self.min_patch_size  * 2**l, self.max_patch_size) for l in range(num_levels)]
+        self.embd_dims = [min(min_emb_size * 2**l, self.max_emb_size) for l in range(num_levels)]
+
         self.bottom_up_layers = bottom_up_layers
         self.top_down_layers = top_down_layers
         self.num_input_layers = num_input_layers
@@ -53,10 +57,10 @@ class GLOM(nn.Module):
         # A seperate encoder (bottom-up net) is used for each level and shared among locations within each level (hence the use of 1x1 convolutions 
         # since it makes the implementation easier).
         encoder_layers = []
-        encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.level_embds[level],self.level_embds[level+1],kernel_size=2,stride=2)))
+        encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],kernel_size=2,stride=2)))
         encoder_layers.append(('enc_act{}_0'.format(level), nn.Hardswish(inplace=True)))
         for layer in range(1,self.bottom_up_layers):
-            encoder_layers.append(('enc_lev{}_{}'.format(level,layer), nn.Conv2d(self.level_embds[level+1],self.level_embds[level+1],kernel_size=1,stride=1)))
+            encoder_layers.append(('enc_lev{}_{}'.format(level,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
             encoder_layers.append(('enc_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
         return nn.Sequential(OrderedDict(encoder_layers))
 
@@ -65,26 +69,26 @@ class GLOM(nn.Module):
         # On pg 4 he mentions that the top-down net should probably use a sinusoidal activation function and he references a paper
         # which describes how they should be implemented (not sure why he recommends sinusoids).
         decoder_layers = []
-        fan_in = self.level_embds[level+1]+2*self.num_levels
-        decoder_layers.append(('dec_lev{}_0'.format(level): nn.Conv2d(fan_in,self.level_embds[level+1],kernel_size=1,stride=1)))
+        fan_in = self.embd_dims[level+1]+2*self.num_levels
+        decoder_layers.append(('dec_lev{}_0'.format(level): nn.Conv2d(fan_in,self.embd_dims[level+1],kernel_size=1,stride=1)))
         nn.init.uniform_(decoder_layers[-1].weight, -self.td_w0*(6/fan_in)**0.5, self.td_w0*(6/fan_in)**0.5)
         decoder_layers.append(('dec_act{}_0'.format(level): Sine()))
         for layer in range(1,self.top_down_layers):
-            decoder_layers.append(('dec_lev{}_{}'.format(level): nn.Conv2d(self.level_embds[level+1],self.level_embds[level+1],kernel_size=1,stride=1)))
-            nn.init.uniform_(decoder_layers[-1].weight, -(6/self.level_embds[level+1])**0.5, (6/self.level_embds[level+1])**0.5)
+            decoder_layers.append(('dec_lev{}_{}'.format(level): nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
+            nn.init.uniform_(decoder_layers[-1].weight, -(6/self.embd_dims[level+1])**0.5, (6/self.embd_dims[level+1])**0.5)
             decoder_layers.append(('dec_act{}_{}'.format(level): Sine()))
 
         return nn.Sequential(OrderedDict(decoder_layers))
 
     def build_input_cnn(self):
         # Input CNN used to initialize the embeddings at each of the levels (see pg 13: 3.5 The Visual Input)
-        cnn_channels = [3,32,32,32,64,128,256,512]
+        cnn_channels = [4,16,32] + self.emb_dims
         cnn_layers = {}
-        for l in range(self.num_input_layers):
+        for l in range(self.num_input_layers-1):
             cnn_layers['cnn_conv_inp{}'.format(l)] = nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)
             cnn_layers['cnn_act_inp{}'.format(l)] = nn.Hardswish(inplace=True)
 
-        for l in range(self.num_levels):
+        for l in range(self.num_input_layers, self.num_input_layers+self.num_levels):
             cnn_layers['cnn_conv_lev{}'.format(l)] = nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)
             cnn_layers['cnn_act_lev{}'.format(l)] = nn.Hardswish(inplace=True)
 
