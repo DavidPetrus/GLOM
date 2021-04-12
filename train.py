@@ -10,11 +10,20 @@ from absl import flags, app
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_integer('batch_size', 1, '')
-flags.DEFINE_integer('num_workers', 8, '')
+flags.DEFINE_integer('batch_size',1,'')
+flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('min_crop_size',8,'Minimum size of cropped region')
 flags.DEFINE_integer('max_crop_size',24,'Maximum size of cropped region')
 flags.DEFINE_float('masked_fraction',0.2,'Fraction of input image that is masked')
+flags.DEFINE_bool('joint_patch_reconstruction',False,'Whether to reconstruct each image patch separately or jointly')
+
+# Contrastive learning flags
+flags.DEFINE_bool('add_projection',False,'Whether or not to add projection MLP')
+flags.DEFINE_bool('add_predictor',False,'Whether to add predictor MLP')
+flags.DEFINE_bool('contrastive_symmetry',True,'Whether contrastive loss should be symmetrical')
+flags.DEFINE_bool('l2_normalize',True,'L2 normalize embeddings before calculating contrastive loss.')
+flags.DEFINE_string('contrastive_loss_func','cosine','cosine or mse')
+
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
 flags.DEFINE_float('reg_coeff',0.1,'Regularization coefficient used for regularization loss')
 
@@ -32,7 +41,6 @@ def main(argv):
 
     train_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/training/*/*/*.jpg")
     val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
-
 
     training_set = Dataset(train_images)
     training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)

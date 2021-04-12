@@ -42,7 +42,10 @@ class GLOM(nn.Module):
         # Threshold used to determine when to stop updating the embeddings
         self.delta_thresh = 10.
 
-        self.loss = nn.MSELoss()
+        if FLAGS.contrastive_loss_func == 'cosine':
+            self.reg_loss = nn.CosineSimilarity()
+        elif FLAGS.contrastive_loss_func == 'mse':
+            self.reg_loss = nn.MSELoss()
 
 
     def build_model(self):
@@ -183,17 +186,18 @@ class GLOM(nn.Module):
         td_loss = []
         for level in range(self.num_levels):
             
-            bottom_up = self.bottom_up_net[level-1](level_embds[level-1]) if level > 0 else 0.
-            top_down = self.top_down(level_embds[level+1],level) if level < self.num_levels-1 else 0.
+            bottom_up = self.bottom_up_net[level-1](level_embds[level-1]) if level > 0 else 1.
+            top_down = self.top_down(level_embds[level+1],level) if level < self.num_levels-1 else 1.
             attention_embd = self.attend_to_level(level_embds[level])
             prev_timestep = level_embds[level]
 
-            # The embedding at each timestep is the average of 4 contributions (see pg. 3)
-            level_embds[level] = (bottom_up+top_down+attention_embd+prev_timestep)/4
+            # The embedding at each timestep is the geometric mean of 4 contributions (see pg. 3)
+            power = 1./4. if 0 < level < self.num_levels-1 else 1./3.
+            level_embds[level] = (bottom_up*top_down*attention_embd*prev_timestep)**power
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            bu_loss.append(self.loss(bottom_up,level_embds[level]))
-            td_loss.append(self.loss(top_down,level_embds[level]))
+            bu_loss.append(-self.reg_loss(bottom_up,level_embds[level].detach()))
+            td_loss.append(-self.reg_loss(top_down,level_embds[level].detach()))
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
