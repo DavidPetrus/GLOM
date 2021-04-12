@@ -26,7 +26,7 @@ class GLOM(nn.Module):
         self.min_patch_size = patch_size[0]
         self.max_patch_size = patch_size[1]
         self.min_emb_size = min_emb_size
-        self.max_emb_size = (self.max_patch_size/self.min_patch_size)*min_emb_size
+        self.max_emb_size = int(self.max_patch_size/self.min_patch_size)*min_emb_size
 
         self.strides = [2 if l < np.log2(self.max_patch_size/self.min_patch_size) else 1 for l in range(self.num_levels)]
         self.level_res = [min(self.min_patch_size  * 2**l, self.max_patch_size) for l in range(num_levels)]
@@ -87,22 +87,22 @@ class GLOM(nn.Module):
         nn.init.uniform_(decoder_layers[-1][1].weight, -self.td_w0*(6/fan_in)**0.5, self.td_w0*(6/fan_in)**0.5)
         decoder_layers.append(('dec_act{}_0'.format(level), Sine()))
         for layer in range(1,self.top_down_layers):
-            decoder_layers.append(('dec_lev{}_{}'.format(level), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
+            decoder_layers.append(('dec_lev{}_{}'.format(level,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
             nn.init.uniform_(decoder_layers[-1][1].weight, -(6/self.embd_dims[level+1])**0.5, (6/self.embd_dims[level+1])**0.5)
-            decoder_layers.append(('dec_act{}_{}'.format(level), Sine()))
+            decoder_layers.append(('dec_act{}_{}'.format(level,layer), Sine()))
 
         return nn.Sequential(OrderedDict(decoder_layers))
 
     def build_input_cnn(self):
         # Input CNN used to initialize the embeddings at each of the levels (see pg 13: 3.5 The Visual Input)
-        cnn_channels = [4,16,32] + self.emb_dims
+        cnn_channels = [4,16,32] + self.embd_dims
         cnn_layers = {}
         for l in range(self.num_input_layers-1):
             cnn_layers['cnn_conv_inp{}'.format(l)] = nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)
             cnn_layers['cnn_act_inp{}'.format(l)] = nn.Hardswish(inplace=True)
 
         for l in range(self.num_input_layers, self.num_input_layers+self.num_levels):
-            cnn_layers['cnn_conv_lev{}'.format(l)] = nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,
+            cnn_layers['cnn_conv_lev{}'.format(l)] = nn.Conv2d(cnn_channels[l-1],cnn_channels[l],kernel_size=3,
                 stride=self.strides[l-self.num_input_layers],padding=1)
             cnn_layers['cnn_act_lev{}'.format(l)] = nn.Hardswish(inplace=True)
 
@@ -115,9 +115,9 @@ class GLOM(nn.Module):
         for l in range(self.num_reconst):
             reconst_layers.append(('reconst_dense{}'.format(l), nn.Conv2d(reconst_chans[l],reconst_chans[l+1],kernel_size=1,stride=1)))
             if l < self.num_reconst-1:
-                cnn_layers.append(('reconst_act{}'.format(l), nn.Hardswish(inplace=True)))
+                reconst_layers.append(('reconst_act{}'.format(l), nn.Hardswish(inplace=True)))
 
-        return nn.Sequential(OrderedDict(cnn_layers))
+        return nn.Sequential(OrderedDict(reconst_layers))
 
     def forward_cnn(self,img):
         x = img
@@ -230,7 +230,7 @@ class GLOM(nn.Module):
 
         reconst_img = self.reconstruction_net(level_embds) # N,192,32,32
         _,_,map_h,map_w = reconst_img.shape
-        reconst_img = reconst_img.moveaxis(1,3).view(batch_size,map_h,map_w,8,8,3).swapdims(2,3).view(batch_size,map_h*8,map_w*8,3)
+        reconst_img = reconst_img.movedim(1,3).view(batch_size,map_h,map_w,8,8,3).movedim(2,3).view(batch_size,map_h*8,map_w*8,3)
         return reconst_img, total_bu_loss, total_td_loss
 
 

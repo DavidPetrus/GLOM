@@ -46,10 +46,10 @@ def main(argv):
     print("Num val images:",len(val_images))
 
     training_set = Dataset(train_images)
-    training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+    training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True)
 
     validation_set = Dataset(val_images)
-    validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+    validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True)
 
     model = GLOM(num_levels=FLAGS.num_levels, min_emb_size=FLAGS.min_emb_size, patch_size=(FLAGS.min_patch_size,FLAGS.max_patch_size), bottom_up_layers=FLAGS.bottom_up_layers, 
                 top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
@@ -62,12 +62,12 @@ def main(argv):
     model.train()
 
     train_iter = 0
-    for masked_image, target_image in training_generator:
+    for masked_load, target_load in training_generator:
         # Set optimzer gradients to zero
         optimizer.zero_grad()
 
-        masked_image = masked.to('cuda')
-        target_image = target.to('cuda')
+        masked_image = masked_load.to('cuda')
+        target_image = target_load.to('cuda')
 
         reconstructed_image, bottom_up_loss, top_down_loss = model(masked_image)
         reconstruction_loss = loss_func(target_image,reconstructed_image)

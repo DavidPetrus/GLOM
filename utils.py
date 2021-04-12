@@ -12,14 +12,15 @@ IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
 
 def resize_image(image):
     height, width, _ = image.shape
-    add_height = height % FLAGS.patch_size
-    add_width = width % FLAGS.patch_size
+    add_height = height % FLAGS.min_patch_size
+    add_width = width % FLAGS.min_patch_size
 
     resized = cv2.resize(image, (height+add_height, width+add_width), interpolation=cv2.INTER_AREA)
 
     return resized
 
 def normalize_image(image):
+    image = image.astype(np.float32)
     image -= IMAGENET_DEFAULT_MEAN
     image /= IMAGENET_DEFAULT_STD
 
@@ -36,6 +37,6 @@ def mask_random_crop(image):
         mask[lu[0]:lu[1], lu[0]+wh[0]:lu[1]+wh[1]] = 1.
 
     image[mask.bool()] = 0.
-    return image, mask
+    return image, mask.view(mask.shape[0],mask.shape[1],1)
 
 

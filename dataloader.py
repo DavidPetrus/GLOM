@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import cv2
 
 from utils import resize_image, normalize_image, mask_random_crop
 
@@ -29,4 +30,4 @@ class Dataset(torch.utils.data.Dataset):
         masked_img, mask = mask_random_crop(img)
         net_input = torch.cat([masked_img, mask], dim=2)
 
-        return net_input, img
+        return torch.movedim(net_input,2,0), torch.movedim(img,2,0)
