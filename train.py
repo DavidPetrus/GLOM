@@ -42,24 +42,32 @@ def main(argv):
     train_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/training/*/*/*.jpg")
     val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
 
+    print("Num train images:",len(train_images))
+    print("Num val images:",len(val_images))
+
     training_set = Dataset(train_images)
     training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
     validation_set = Dataset(val_images)
     validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
-
-    optimizer = torch.optim.Adam(lr=FLAGS.lr)
-
     model = GLOM(num_levels=FLAGS.num_levels, min_emb_size=FLAGS.min_emb_size, patch_size=(FLAGS.min_patch_size,FLAGS.max_patch_size), bottom_up_layers=FLAGS.bottom_up_layers, 
                 top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
+    optimizer = torch.optim.Adam(params=model.parameters(),lr=FLAGS.lr)
+
     loss_func = torch.nn.MSELoss()
+
+    model.to('cuda')
+    model.train()
 
     train_iter = 0
     for masked_image, target_image in training_generator:
         # Set optimzer gradients to zero
         optimizer.zero_grad()
+
+        masked_image = masked.to('cuda')
+        target_image = target.to('cuda')
 
         reconstructed_image, bottom_up_loss, top_down_loss = model(masked_image)
         reconstruction_loss = loss_func(target_image,reconstructed_image)
@@ -72,6 +80,7 @@ def main(argv):
         optimizer.step()
 
         train_iter += 1
+        print("Train Iteration {}; Reconstruction Loss {}; Bottom-Up {}; Top-Down {}".format(train_iter,reconstruction_loss,bottom_up_loss,top_down_loss))
 
 
 

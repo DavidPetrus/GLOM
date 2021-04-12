@@ -4,6 +4,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from absl import flags
+
+FLAGS = flags.FLAGS
+
 
 class Sine(nn.Module):
     def __init__(self):
@@ -16,6 +20,7 @@ class Sine(nn.Module):
 class GLOM(nn.Module):
 
     def __init__(self, num_levels=5, min_emb_size=64, patch_size=(8,32), bottom_up_layers=3, top_down_layers=3, num_input_layers=3, num_reconst=3):
+        super(GLOM, self).__init__()
 
         self.num_levels = num_levels
         self.min_patch_size = patch_size[0]
@@ -47,6 +52,8 @@ class GLOM(nn.Module):
         elif FLAGS.contrastive_loss_func == 'mse':
             self.reg_loss = nn.MSELoss()
 
+        self.build_model()
+
 
     def build_model(self):
         # Initialize seperate Bottom-Up net for each level
@@ -61,7 +68,8 @@ class GLOM(nn.Module):
         # A seperate encoder (bottom-up net) is used for each level and shared among locations within each level (hence the use of 1x1 convolutions 
         # since it makes the implementation easier).
         encoder_layers = []
-        encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],kernel_size=2,stride=self.strides[level])))
+        encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],
+                                kernel_size=self.strides[level],stride=self.strides[level])))
         encoder_layers.append(('enc_act{}_0'.format(level), nn.Hardswish(inplace=True)))
         for layer in range(1,self.bottom_up_layers):
             encoder_layers.append(('enc_lev{}_{}'.format(level,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
@@ -75,13 +83,13 @@ class GLOM(nn.Module):
         # which describes how they should be implemented (not sure why he recommends sinusoids).
         decoder_layers = []
         fan_in = self.embd_dims[level+1]+2*self.num_levels
-        decoder_layers.append(('dec_lev{}_0'.format(level): nn.Conv2d(fan_in,self.embd_dims[level+1],kernel_size=1,stride=1)))
-        nn.init.uniform_(decoder_layers[-1].weight, -self.td_w0*(6/fan_in)**0.5, self.td_w0*(6/fan_in)**0.5)
-        decoder_layers.append(('dec_act{}_0'.format(level): Sine()))
+        decoder_layers.append(('dec_lev{}_0'.format(level), nn.Conv2d(fan_in,self.embd_dims[level+1],kernel_size=1,stride=1)))
+        nn.init.uniform_(decoder_layers[-1][1].weight, -self.td_w0*(6/fan_in)**0.5, self.td_w0*(6/fan_in)**0.5)
+        decoder_layers.append(('dec_act{}_0'.format(level), Sine()))
         for layer in range(1,self.top_down_layers):
-            decoder_layers.append(('dec_lev{}_{}'.format(level): nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
-            nn.init.uniform_(decoder_layers[-1].weight, -(6/self.embd_dims[level+1])**0.5, (6/self.embd_dims[level+1])**0.5)
-            decoder_layers.append(('dec_act{}_{}'.format(level): Sine()))
+            decoder_layers.append(('dec_lev{}_{}'.format(level), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
+            nn.init.uniform_(decoder_layers[-1][1].weight, -(6/self.embd_dims[level+1])**0.5, (6/self.embd_dims[level+1])**0.5)
+            decoder_layers.append(('dec_act{}_{}'.format(level), Sine()))
 
         return nn.Sequential(OrderedDict(decoder_layers))
 
@@ -100,6 +108,17 @@ class GLOM(nn.Module):
 
         return nn.ModuleDict(cnn_layers)
 
+    def build_reconstruction_net(self):
+        # CNN used to reconstruct the input image (and the missing pixels) using the embeddings from the bottom level.
+        reconst_chans = [64,128,256,192]
+        reconst_layers = []
+        for l in range(self.num_reconst):
+            reconst_layers.append(('reconst_dense{}'.format(l), nn.Conv2d(reconst_chans[l],reconst_chans[l+1],kernel_size=1,stride=1)))
+            if l < self.num_reconst-1:
+                cnn_layers.append(('reconst_act{}'.format(l), nn.Hardswish(inplace=True)))
+
+        return nn.Sequential(OrderedDict(cnn_layers))
+
     def forward_cnn(self,img):
         x = img
         level_embds = []
@@ -109,17 +128,6 @@ class GLOM(nn.Module):
                 level_embds.append(x)
 
         return level_embds
-
-    def build_reconstruction_net(self):
-        # CNN used to reconstruct the input image (and the missing pixels) using the embeddings from the bottom level.
-        reconst_chans = [64,128,256,192]
-        reconst_layers = []
-        for l in range(self.num_reconst):
-            reconst_layers.append(('reconst_dense{}'.format(l): nn.Conv2d(reconst_chans[l],reconst_chans[l+1],kernel_size=1,stride=1)))
-            if l < self.num_reconst-1:
-                cnn_layers.append(('reconst_act{}'.format(l): nn.Hardswish(inplace=True)))
-
-        return nn.Sequential(OrderedDict(cnn_layers))
 
     def generate_positional_encoding(self, height, width):
         # Sinusoidal positional encoding (See 2.3 Neural Fields)
