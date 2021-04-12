@@ -154,38 +154,41 @@ class GLOM(nn.Module):
         return self.top_down_net[level](cat_embds)
     
     def sample_locations(self,embeddings):
+        batch_size,h,w,embd_size = embeddings.shape
+
         # Randomly sample other locations on the same level to attend to (described on pg 16, final paragraph of 6: Replicating Islands)
-        means = torch.stack([torch.arange(0, embeddings.shape[0]).view(-1,1).tile((1,embeddings.shape[1])), 
-                             torch.arange(0, embeddings.shape[1]).view(1,-1).tile((embeddings.shape[0],1))],dim=2)
-        means = means.view(embeddings.shape[0],embeddings.shape[1],1,2).tile(1,1,self.num_samples,1)
+        means = torch.stack([torch.arange(0,h).view(-1,1).tile((1,w)), 
+                             torch.arange(0,w).view(1,-1).tile((h,1))],dim=2)
+        means = means.view(1,h,w,1,2).tile(batch_size,1,1,self.num_samples,1)
         stds = torch.full_like(means,self.attention_std)
         loc_samples = torch.normal(means,stds)
         loc_samples = torch.round(loc_samples).to(torch.long)
 
         # Avoid invalid locations and attending to one self.
         mask = loc_samples >= 0 and loc_samples != means
-        mask = mask.sum(3)
+        mask = mask.sum(4)
 
-        sample_vector = loc_samples.view(embeddings.shape[0]*embeddings.shape[1]*self.num_samples,2)
-        values = embeddings[loc_samples[:,0],loc_samples[:,1]].view(embeddings.shape[0],embeddings.shape[1],self.num_samples,embeddings.shape[2])
+        sample_vector = loc_samples.view(batch_size,h*w*self.num_samples,2)
+        values = embeddings[loc_samples[:,:,0],loc_samples[:,:,1]].view(batch_size,h,w,self.num_samples,embd_size)
         return values, mask
 
     def attend_to_level(self,embeddings,temperature=1.):
+        batch_size,h,w,embd_size = embeddings.shape
+
         # Implementation of the attention mechanism described on pg 13
         values, mask = self.sample_locations(embeddings)
-        product = values * embeddings.view(embeddings.shape[0],embeddings.shape[1],1,embeddings.shape[3])
-        dot_prod = product.sum(3)
+        product = values * embeddings.view(batch_size,h,w,1,embd_size)
+        dot_prod = product.sum(4)
         exp = torch.exp(temperature*(dot_prod-dot_prod.max()))*mask
-        sm = exp/exp.sum(2,keepdim=True)
-        prod = values*sm.view(embeddings.shape[0],embeddings.shape[1],1,1)
-        return prod.sum(2)
+        sm = exp/exp.sum(4,keepdim=True)
+        prod = values*sm.view(batch_size,h,w,1,1)
+        return prod.sum(3)
 
     def update_embeddings(self,level_embds):
         level_deltas = []
         bu_loss = []
         td_loss = []
         for level in range(self.num_levels):
-            
             bottom_up = self.bottom_up_net[level-1](level_embds[level-1]) if level > 0 else 1.
             top_down = self.top_down(level_embds[level+1],level) if level < self.num_levels-1 else 1.
             attention_embd = self.attend_to_level(level_embds[level])
