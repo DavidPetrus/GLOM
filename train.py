@@ -18,9 +18,7 @@ flags.DEFINE_float('masked_fraction',0.2,'Fraction of input image that is masked
 flags.DEFINE_bool('joint_patch_reconstruction',False,'Whether to reconstruct each image patch separately or jointly')
 
 # Contrastive learning flags
-flags.DEFINE_bool('add_projection',False,'Whether or not to add projection MLP')
 flags.DEFINE_bool('add_predictor',False,'Whether to add predictor MLP')
-flags.DEFINE_bool('contrastive_symmetry',True,'Whether contrastive loss should be symmetrical')
 flags.DEFINE_bool('l2_normalize',True,'L2 normalize embeddings before calculating contrastive loss.')
 flags.DEFINE_string('contrastive_loss_func','cosine','cosine or mse')
 
@@ -85,5 +83,5 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    torch.multiprocessing.set_start_method('spawn', force=True)
+    #torch.multiprocessing.set_start_method('spawn', force=True)
     app.run(main)

@@ -26,7 +26,7 @@ class Dataset(torch.utils.data.Dataset):
         img = cv2.imread(img_file)
         img = resize_image(img)
         img = normalize_image(img)
-        img = torch.from_numpy(img)
+        img = torch.from_numpy(np.ascontiguousarray(img))
         masked_img, mask = mask_random_crop(img)
         net_input = torch.cat([masked_img, mask], dim=2)
 
