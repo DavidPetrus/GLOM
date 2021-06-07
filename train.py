@@ -20,7 +20,7 @@ flags.DEFINE_bool('joint_patch_reconstruction',False,'Whether to reconstruct eac
 # Contrastive learning flags
 flags.DEFINE_bool('add_predictor',False,'Whether to add predictor MLP')
 flags.DEFINE_bool('l2_normalize',True,'L2 normalize embeddings before calculating contrastive loss.')
-flags.DEFINE_string('contrastive_loss_func','cosine','cosine or mse')
+flags.DEFINE_string('layer_norm','bu','bu,bu_and_td,out,none')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
 flags.DEFINE_float('reg_coeff',0.1,'Regularization coefficient used for regularization loss')

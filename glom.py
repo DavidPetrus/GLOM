@@ -90,11 +90,17 @@ class GLOM(nn.Module):
         encoder_layers = []
         encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],
                                 kernel_size=self.strides[level],stride=self.strides[level])))
+        if FLAGS.layer_norm != 'none':
+            encoder_layers.append(('enc_norm{}_0'.format(level), nn.LayerNorm(self.embd_dims[level+1])))
         encoder_layers.append(('enc_act{}_0'.format(level), nn.Hardswish(inplace=True)))
         for layer in range(1,self.bottom_up_layers):
             encoder_layers.append(('enc_lev{}_{}'.format(level,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
             if layer < self.bottom_up_layers-1:
+                if FLAGS.layer_norm != 'none':
+                    encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.LayerNorm(self.embd_dims[level+1])))
                 encoder_layers.append(('enc_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
+            elif FLAGS.layer_norm == 'out':
+                encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.LayerNorm(self.embd_dims[level+1])))
 
         return nn.Sequential(OrderedDict(encoder_layers))
 
@@ -113,6 +119,8 @@ class GLOM(nn.Module):
             nn.init.uniform_(decoder_layers[-1][1].weight, -(6/fan_in)**0.5, (6/self.embd_dims[level])**0.5)
             if layer < self.top_down_layers-1:
                 decoder_layers.append(('dec_act{}_{}'.format(level,layer), Sine()))
+            elif FLAGS.layer_norm == 'out':
+                decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.LayerNorm(self.embd_dims[level])))
 
             fan_in = self.embd_dims[level]
 
@@ -165,7 +173,7 @@ class GLOM(nn.Module):
 
         return torch.stack(height_mat).transpose(0,1).view(1,height,1,2*self.num_pos_freqs),torch.stack(width_mat).transpose(0,1).view(1,1,width,2*self.num_pos_freqs)
         
-    def top_down(self,embeddings,level):
+    def top_down(self, embeddings, level):
         # Positional encoding  is concatenated to the embedding at level L before being passed through the Top-Down net
         # and used to predict the embedding at level L-1 
         batch_size,h,w,embd_size = embeddings.shape
@@ -179,7 +187,7 @@ class GLOM(nn.Module):
         
         return self.top_down_net[level](cat_embds)
     
-    def sample_locations(self,embeddings):
+    def sample_locations(self, embeddings):
         batch_size,h,w,embd_size = embeddings.shape
 
         # Randomly sample other locations on the same level to attend to (described on pg 16, final paragraph of 6: Replicating Islands)
@@ -188,7 +196,7 @@ class GLOM(nn.Module):
         values = embeddings.reshape(h*w,-1)[sampled_idxs.reshape(-1)].reshape(1,h,w, self.num_samples,-1)
         return values
 
-    def attend_to_level(self,embeddings,temperature=1.):
+    def attend_to_level(self, embeddings, temperature=1.):
         batch_size,h,w,embd_size = embeddings.shape
 
         # Implementation of the attention mechanism described on pg 13
@@ -211,7 +219,7 @@ class GLOM(nn.Module):
         dot_prod = (preds*level_embds).sum(3)
         return dot_prod
 
-    def update_embeddings(self,level_embds):
+    def update_embeddings(self, level_embds):
         level_deltas = []
         bu_loss = []
         td_loss = []
@@ -225,8 +233,8 @@ class GLOM(nn.Module):
             level_embds[level] = (bottom_up+top_down+attention_embd+prev_timestep)/self.num_contribs[level]
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            bu_loss.append(-self.similarity(level_embds[level].detach(), bottom_up, level))
-            td_loss.append(-self.similarity(level_embds[level].detach(), top_down, level))
+            bu_loss.append(-self.similarity(level_embds[level].detach(), bottom_up, level).mean())
+            td_loss.append(-self.similarity(level_embds[level].detach(), top_down, level).mean())
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
@@ -234,7 +242,7 @@ class GLOM(nn.Module):
 
         return level_embds, level_deltas, bu_loss, td_loss
 
-    def forward(self,img):
+    def forward(self, img):
         batch_size,height,width,_ = img.shape
         embd_input = self.input_cnn(img)
         level_embds = [embd_input]
