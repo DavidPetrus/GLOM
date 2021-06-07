@@ -142,7 +142,7 @@ class GLOM(nn.Module):
         #        stride=self.strides[l-self.num_input_layers],padding=1)
         #    cnn_layers['cnn_act_lev{}'.format(l)] = nn.Hardswish(inplace=True)
 
-        return nn.ModuleDict(cnn_layers)
+        return nn.Sequential(nn.ModuleDict(cnn_layers))
 
     def build_reconstruction_net(self):
         # CNN used to reconstruct the input image (and the missing pixels) using the embeddings from the bottom level.
@@ -178,47 +178,47 @@ class GLOM(nn.Module):
     def top_down(self, embeddings, level):
         # Positional encoding  is concatenated to the embedding at level L before being passed through the Top-Down net
         # and used to predict the embedding at level L-1 
-        batch_size,h,w,embd_size = embeddings.shape
+        batch_size,embd_size,h,w = embeddings.shape
         if self.strides[level] == 2:
-            rep_embds = torch.repeat_interleave(torch.repeat_interleave(embeddings,2,dim=2),2,dim=1)
+            rep_embds = torch.repeat_interleave(torch.repeat_interleave(embeddings,2,dim=2),2,dim=3)
         else:
             rep_embds = embeddings
 
-        height_pos,width_pos = self.generate_positional_encoding(rep_embds.shape[1],rep_embds.shape[2])
-        cat_embds = torch.cat([rep_embds,height_pos.tile((1,1,rep_embds.shape[2],1)),width_pos.tile((1,rep_embds.shape[1],1,1))],dim=3)
+        height_pos,width_pos = self.generate_positional_encoding(rep_embds.shape[2],rep_embds.shape[3])
+        cat_embds = torch.cat([rep_embds,height_pos.tile((1,1,rep_embds.shape[2],1)),width_pos.tile((1,1,1,rep_embds.shape[3]))],dim=1)
         
         return self.top_down_net[level](cat_embds)
     
     def sample_locations(self, embeddings):
-        batch_size,h,w,embd_size = embeddings.shape
+        batch_size,embd_size,h,w = embeddings.shape
 
         # Randomly sample other locations on the same level to attend to (described on pg 16, final paragraph of 6: Replicating Islands)
         sampled_idxs = torch.multinomial(self.probs[:h,:w,:h,:w].reshape(h*w,h*w), self.num_samples)
 
-        values = embeddings.reshape(h*w,-1)[sampled_idxs.reshape(-1)].reshape(1,h,w, self.num_samples,-1)
+        values = embeddings.reshape(embd_size,h*w)[:,sampled_idxs.reshape(h*w*self.num_samples)].reshape(1,embd_size,h,w,self.num_samples)
         return values
 
     def attend_to_level(self, embeddings, temperature=1.):
-        batch_size,h,w,embd_size = embeddings.shape
+        batch_size,embd_size,h,w = embeddings.shape
 
         # Implementation of the attention mechanism described on pg 13
         values = self.sample_locations(embeddings)
-        product = values * embeddings.reshape(batch_size,h,w,1,embd_size)
-        dot_prod = product.sum(4)
+        product = values * embeddings.reshape(batch_size,embd_size,h,w,1)
+        dot_prod = product.sum(1)
         exp = torch.exp(temperature*(dot_prod-dot_prod.max()))
         sm = exp/exp.sum(3,keepdim=True)
-        prod = values*sm.reshape(batch_size,h,w,1,1)
-        return prod.sum(3)
+        prod = values*sm.reshape(batch_size,1,h,w,self.num_samples)
+        return prod.sum(4)
 
     def similarity(self, level_embds, preds, level):
         if FLAGS.add_predictor:
             preds = self.pred_net[level](preds)
 
         if FLAGS.l2_normalize:
-            preds = F.normalize(preds, dim=3)
-            level_embds = F.normalize(level_embds, dim=3)
+            preds = F.normalize(preds, dim=1)
+            level_embds = F.normalize(level_embds, dim=1)
 
-        dot_prod = (preds*level_embds).sum(3)
+        dot_prod = (preds*level_embds).sum(1)
         return dot_prod
 
     def update_embeddings(self, level_embds):
@@ -240,7 +240,7 @@ class GLOM(nn.Module):
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
-            level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=2))
+            level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1))
 
         return level_embds, level_deltas, bu_loss, td_loss
 
