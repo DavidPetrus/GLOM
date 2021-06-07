@@ -13,7 +13,7 @@ FLAGS = flags.FLAGS
 
 class Sine(nn.Module):
     def __init__(self):
-        super().__init__()
+        super(Sine, self).__init__()
 
     def forward(self, inp):
         return torch.sin(inp)
@@ -90,17 +90,19 @@ class GLOM(nn.Module):
         encoder_layers = []
         encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],
                                 kernel_size=self.strides[level],stride=self.strides[level])))
+
         if FLAGS.layer_norm != 'none':
-            encoder_layers.append(('enc_norm{}_0'.format(level), nn.LayerNorm(self.embd_dims[level+1])))
+            encoder_layers.append(('enc_norm{}_0'.format(level), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
+
         encoder_layers.append(('enc_act{}_0'.format(level), nn.Hardswish(inplace=True)))
         for layer in range(1,self.bottom_up_layers):
             encoder_layers.append(('enc_lev{}_{}'.format(level,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
             if layer < self.bottom_up_layers-1:
                 if FLAGS.layer_norm != 'none':
-                    encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.LayerNorm(self.embd_dims[level+1])))
+                    encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
                 encoder_layers.append(('enc_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
             elif FLAGS.layer_norm == 'out':
-                encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.LayerNorm(self.embd_dims[level+1])))
+                encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
 
         return nn.Sequential(OrderedDict(encoder_layers))
 
@@ -120,7 +122,7 @@ class GLOM(nn.Module):
             if layer < self.top_down_layers-1:
                 decoder_layers.append(('dec_act{}_{}'.format(level,layer), Sine()))
             elif FLAGS.layer_norm == 'out':
-                decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.LayerNorm(self.embd_dims[level])))
+                decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level], affine=True)))
 
             fan_in = self.embd_dims[level]
 
@@ -243,7 +245,7 @@ class GLOM(nn.Module):
         return level_embds, level_deltas, bu_loss, td_loss
 
     def forward(self, img):
-        batch_size,height,width,_ = img.shape
+        batch_size,chans,height,width = img.shape
         embd_input = self.input_cnn(img)
         level_embds = [embd_input]
         for level in range(1,self.num_levels):
