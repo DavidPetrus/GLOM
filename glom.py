@@ -205,10 +205,9 @@ class GLOM(nn.Module):
         # Implementation of the attention mechanism described on pg 13
         values = self.sample_locations(embeddings)
         product = values * embeddings.reshape(batch_size,embd_size,h,w,1)
-        dot_prod = product.sum(1)
-        exp = torch.exp(temperature*(dot_prod-dot_prod.max()))
-        sm = exp/exp.sum(3,keepdim=True)
-        prod = values*sm.reshape(batch_size,1,h,w,self.num_samples)
+        dot_prod = product.sum(1,keepdim=True)
+        weights = F.softmax(dot_prod/temperature, dim=4)
+        prod = values*weights
         return prod.sum(4)
 
     def similarity(self, level_embds, preds, level):
@@ -231,7 +230,7 @@ class GLOM(nn.Module):
             top_down = self.top_down(level_embds[level+1],level) if level < self.num_levels-1 else self.zero_tensor
             attention_embd = self.attend_to_level(level_embds[level])
             prev_timestep = level_embds[level]
-            print(level_embds[level].mean())
+            #print(bottom_up.mean(),top_down.mean(),attention_embd.mean(),prev_timestep.mean())
 
             # The embedding at each timestep is the average of 4 contributions (see pg. 3)
             level_embds[level] = (bottom_up+top_down+attention_embd+prev_timestep)/self.num_contribs[level]
@@ -245,8 +244,6 @@ class GLOM(nn.Module):
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
             level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
-
-        print(level_deltas)
 
         return level_embds, level_deltas, bu_loss, td_loss
 
@@ -264,7 +261,8 @@ class GLOM(nn.Module):
             level_embds, deltas, bu_loss, td_loss = self.update_embeddings(level_embds)
             total_bu_loss += sum(bu_loss)
             total_td_loss += sum(td_loss)
-            if sum(deltas).sum() < self.delta_thresh:
+            print(sum(deltas))
+            if sum(deltas) < self.delta_thresh:
                 break
 
         reconst_img = self.reconstruction_net(level_embds) # N,192,32,32

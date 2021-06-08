@@ -12,8 +12,8 @@ IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
 
 def resize_image(image):
     height, width, _ = image.shape
-    new_height = min(1024, height - height%FLAGS.min_patch_size)
-    new_width = min(1024, width - width%FLAGS.min_patch_size)
+    new_height = min(1024, height - height%FLAGS.max_patch_size)
+    new_width = min(1024, width - width%FLAGS.max_patch_size)
 
     return image[:new_height, :new_width]
 
