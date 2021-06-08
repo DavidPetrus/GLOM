@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import torch
 import glob
+import datetime
 
 from glom import GLOM
 from dataloader import Dataset
@@ -36,8 +37,9 @@ flags.DEFINE_integer('num_reconst',3,'Number of layers for reconstruction CNN')
 
 
 def main(argv):
+    start = datetime.datetime.now()
 
-    train_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/training/nature_landscape/*/*.jpg")
+    train_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/nature_landscape/*/*.jpg")
     #val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
 
     print("Num train images:",len(train_images))
@@ -58,6 +60,8 @@ def main(argv):
 
     model.to('cuda')
     model.train()
+
+    print((datetime.datetime.now()-start).total_seconds())
 
     train_iter = 0
     for masked_load, target_load in training_generator:

@@ -12,12 +12,10 @@ IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
 
 def resize_image(image):
     height, width, _ = image.shape
-    add_height = height % FLAGS.min_patch_size
-    add_width = width % FLAGS.min_patch_size
+    new_height = min(1024, height - height%FLAGS.min_patch_size)
+    new_width = min(1024, width - width%FLAGS.min_patch_size)
 
-    resized = cv2.resize(image, (height+add_height, width+add_width), interpolation=cv2.INTER_AREA)
-
-    return resized
+    return image[:new_height, :new_width]
 
 def normalize_image(image):
     image = image.astype(np.float32)

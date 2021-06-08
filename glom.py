@@ -50,6 +50,8 @@ class GLOM(nn.Module):
         self.attention_std = 3
         self.num_samples = 20
 
+        self.zero_tensor = torch.zeros(1, device='cuda')
+
         stds = np.arange(0,128,dtype=np.float32)/self.attention_std
         stds = np.tile(stds.reshape(128,1),(1,128)).reshape(128,128,1)
         std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
@@ -57,8 +59,6 @@ class GLOM(nn.Module):
         probs = scipy.stats.norm.cdf(dists+1/self.attention_std)-scipy.stats.norm.cdf(dists)
         np.fill_diagonal(probs,0.)
         self.probs = torch.tensor(np.reshape(probs,(128,128,128,128)))
-        print(self.probs[0,0])
-        print(self.probs[10,5])
 
         # Threshold used to determine when to stop updating the embeddings
         self.delta_thresh = 10.
@@ -112,7 +112,7 @@ class GLOM(nn.Module):
         # On pg 4 he mentions that the top-down net should probably use a sinusoidal activation function and he references a paper
         # which describes how they should be implemented (not sure why he recommends sinusoids).
         decoder_layers = []
-        fan_in = self.embd_dims[level+1] + 2*self.num_pos_freqs
+        fan_in = self.embd_dims[level+1] + 4*self.num_pos_freqs
         decoder_layers.append(('dec_lev{}_0'.format(level), nn.Conv2d(fan_in,self.embd_dims[level+1],kernel_size=1,stride=1)))
         nn.init.uniform_(decoder_layers[-1][1].weight, -self.td_w0*(6/fan_in)**0.5, self.td_w0*(6/fan_in)**0.5)
         decoder_layers.append(('dec_act{}_0'.format(level), Sine()))
@@ -132,18 +132,18 @@ class GLOM(nn.Module):
     def build_input_cnn(self):
         # Input CNN used to initialize the embeddings at each of the levels (see pg 13: 3.5 The Visual Input)
         cnn_channels = [4,16,32,self.min_emb_size]
-        cnn_layers = {}
+        cnn_layers = []
         for l in range(self.num_input_layers):
-            cnn_layers['cnn_conv_inp{}'.format(l)] = nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)
+            cnn_layers.append(('cnn_conv_inp{}'.format(l), nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)))
             if l < self.num_input_layers-1:
-                cnn_layers['cnn_act_inp{}'.format(l)] = nn.Hardswish(inplace=True)
+                cnn_layers.append(('cnn_act_inp{}'.format(l), nn.Hardswish(inplace=True)))
 
         #for l in range(self.num_input_layers, self.num_input_layers+self.num_levels):
         #    cnn_layers['cnn_conv_lev{}'.format(l)] = nn.Conv2d(cnn_channels[l-1],cnn_channels[l],kernel_size=3,
         #        stride=self.strides[l-self.num_input_layers],padding=1)
         #    cnn_layers['cnn_act_lev{}'.format(l)] = nn.Hardswish(inplace=True)
 
-        return nn.Sequential(nn.ModuleDict(cnn_layers))
+        return nn.Sequential(OrderedDict(cnn_layers))
 
     def build_reconstruction_net(self):
         # CNN used to reconstruct the input image (and the missing pixels) using the embeddings from the bottom level.
@@ -174,7 +174,7 @@ class GLOM(nn.Module):
             width_mat.append(torch.sin(2**freq * locs_width))
             width_mat.append(torch.cos(2**freq * locs_width))
 
-        return torch.stack(height_mat).transpose(0,1).view(1,height,1,2*self.num_pos_freqs),torch.stack(width_mat).transpose(0,1).view(1,1,width,2*self.num_pos_freqs)
+        return torch.stack(height_mat).view(1,2*self.num_pos_freqs,height,1),torch.stack(width_mat).view(1,2*self.num_pos_freqs,1,width)
         
     def top_down(self, embeddings, level):
         # Positional encoding  is concatenated to the embedding at level L before being passed through the Top-Down net
@@ -186,7 +186,7 @@ class GLOM(nn.Module):
             rep_embds = embeddings
 
         height_pos,width_pos = self.generate_positional_encoding(rep_embds.shape[2],rep_embds.shape[3])
-        cat_embds = torch.cat([rep_embds,height_pos.tile((1,1,rep_embds.shape[2],1)),width_pos.tile((1,1,1,rep_embds.shape[3]))],dim=1)
+        cat_embds = torch.cat([rep_embds,height_pos.tile((1,1,1,rep_embds.shape[3])),width_pos.tile((1,1,rep_embds.shape[2],1))],dim=1)
         
         return self.top_down_net[level](cat_embds)
     
@@ -227,26 +227,32 @@ class GLOM(nn.Module):
         bu_loss = []
         td_loss = []
         for level in range(self.num_levels):
-            bottom_up = self.bottom_up_net[level-1](level_embds[level-1]) if level > 0 else 0.
-            top_down = self.top_down(level_embds[level+1],level) if level < self.num_levels-1 else 0.
+            bottom_up = self.bottom_up_net[level-1](level_embds[level-1]) if level > 0 else self.zero_tensor
+            top_down = self.top_down(level_embds[level+1],level) if level < self.num_levels-1 else self.zero_tensor
             attention_embd = self.attend_to_level(level_embds[level])
             prev_timestep = level_embds[level]
+            print(level_embds[level].mean())
 
             # The embedding at each timestep is the average of 4 contributions (see pg. 3)
             level_embds[level] = (bottom_up+top_down+attention_embd+prev_timestep)/self.num_contribs[level]
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            bu_loss.append(-self.similarity(level_embds[level].detach(), bottom_up, level).mean())
-            td_loss.append(-self.similarity(level_embds[level].detach(), top_down, level).mean())
+            if level > 0:
+                bu_loss.append(-self.similarity(level_embds[level].detach(), bottom_up, level).mean())
+            if level < self.num_levels-1:
+                td_loss.append(-self.similarity(level_embds[level].detach(), top_down, level).mean())
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
-            level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1))
+            level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
+
+        print(level_deltas)
 
         return level_embds, level_deltas, bu_loss, td_loss
 
     def forward(self, img):
         batch_size,chans,height,width = img.shape
+        print(img.shape)
         embd_input = self.input_cnn(img)
         level_embds = [embd_input]
         for level in range(1,self.num_levels):
