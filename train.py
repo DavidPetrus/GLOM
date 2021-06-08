@@ -37,24 +37,24 @@ flags.DEFINE_integer('num_reconst',3,'Number of layers for reconstruction CNN')
 
 def main(argv):
 
-    train_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/training/*/*/*.jpg")
-    val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
+    train_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/training/nature_landscape/*/*.jpg")
+    #val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
 
     print("Num train images:",len(train_images))
-    print("Num val images:",len(val_images))
+    #print("Num val images:",len(val_images))
 
     training_set = Dataset(train_images)
     training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True)
 
-    validation_set = Dataset(val_images)
-    validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True)
+    #validation_set = Dataset(val_images)
+    #validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True)
 
     model = GLOM(num_levels=FLAGS.num_levels, min_emb_size=FLAGS.min_emb_size, patch_size=(FLAGS.min_patch_size,FLAGS.max_patch_size), bottom_up_layers=FLAGS.bottom_up_layers, 
                 top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
     optimizer = torch.optim.Adam(params=model.parameters(),lr=FLAGS.lr)
 
-    loss_func = torch.nn.MSELoss()
+    loss_func = torch.nn.MSELoss(reduction='mean')
 
     model.to('cuda')
     model.train()

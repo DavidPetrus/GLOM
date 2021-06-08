@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import scipy
+import scipy.spatial.distance
+import scipy.stats
 
 from absl import flags
 
@@ -49,13 +50,13 @@ class GLOM(nn.Module):
         self.attention_std = 3
         self.num_samples = 20
 
-        stds = np.arange(0,256)/self.attention_std
-        stds = np.tile(stds.reshape(256,1),(1,256)).reshape(256,256,1)
-        std_mat = np.concatenate(stds,np.moveaxis(stds,0,1),axis=2)
+        stds = np.arange(0,128,dtype=np.float32)/self.attention_std
+        stds = np.tile(stds.reshape(128,1),(1,128)).reshape(128,128,1)
+        std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
         dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
         probs = scipy.stats.norm.cdf(dists+1/self.attention_std)-scipy.stats.norm.cdf(dists)
         np.fill_diagonal(probs,0.)
-        self.probs = torch.tensor(np.reshape(probs,(256,256,256,256)))
+        self.probs = torch.tensor(np.reshape(probs,(128,128,128,128)))
         print(self.probs[0,0])
         print(self.probs[10,5])
 
@@ -262,7 +263,7 @@ class GLOM(nn.Module):
 
         reconst_img = self.reconstruction_net(level_embds) # N,192,32,32
         _,_,map_h,map_w = reconst_img.shape
-        reconst_img = reconst_img.movedim(1,3).view(batch_size,map_h,map_w,8,8,3).movedim(2,3).view(batch_size,map_h*8,map_w*8,3)
+        #reconst_img = reconst_img.movedim(1,3).view(batch_size,map_h,map_w,8,8,3).movedim(2,3).view(batch_size,map_h*8,map_w*8,3)
         return reconst_img, total_bu_loss, total_td_loss
 
 

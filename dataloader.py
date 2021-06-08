@@ -23,7 +23,7 @@ class Dataset(torch.utils.data.Dataset):
         # Select sample
         img_file = self.image_files[index]
 
-        img = cv2.imread(img_file)
+        img = cv2.imread(img_file)[:,:,::-1]
         img = resize_image(img)
         img = normalize_image(img)
         img = torch.from_numpy(np.ascontiguousarray(img))
