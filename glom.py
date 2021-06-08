@@ -58,7 +58,7 @@ class GLOM(nn.Module):
         dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
         probs = scipy.stats.norm.cdf(dists+1/self.attention_std)-scipy.stats.norm.cdf(dists)
         np.fill_diagonal(probs,0.)
-        self.probs = torch.tensor(np.reshape(probs,(128,128,128,128)))
+        self.probs = torch.tensor(np.reshape(probs,(128,128,128,128)),device='cuda')
 
         # Threshold used to determine when to stop updating the embeddings
         self.delta_thresh = 10.
@@ -237,13 +237,13 @@ class GLOM(nn.Module):
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
             if level > 0:
-                bu_loss.append(-self.similarity(level_embds[level].detach(), bottom_up, level).mean())
+                bu_loss.append((1.-self.similarity(level_embds[level].detach(), bottom_up, level)).mean())
             if level < self.num_levels-1:
-                td_loss.append(-self.similarity(level_embds[level].detach(), top_down, level).mean())
+                td_loss.append((1.-self.similarity(level_embds[level].detach(), top_down, level)).mean())
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
-            level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
+            #level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
 
         return level_embds, level_deltas, bu_loss, td_loss
 
@@ -257,17 +257,17 @@ class GLOM(nn.Module):
 
         total_bu_loss, total_td_loss = 0.,0.
         # Keep on updating embeddings until they settle on constant value.
-        while True:
+        for t in range(FLAGS.timesteps):
             level_embds, deltas, bu_loss, td_loss = self.update_embeddings(level_embds)
-            total_bu_loss += sum(bu_loss)
-            total_td_loss += sum(td_loss)
-            print(sum(deltas))
-            if sum(deltas) < self.delta_thresh:
-                break
+            total_bu_loss += sum(bu_loss)/(FLAGS.timesteps*self.num_levels)
+            total_td_loss += sum(td_loss)/(FLAGS.timesteps*self.num_levels)
+            #print(sum(deltas))
+            #if sum(deltas) < self.delta_thresh:
+            #    break
 
-        reconst_img = self.reconstruction_net(level_embds) # N,192,32,32
+        reconst_img = self.reconstruction_net(level_embds[0]) # N,192,32,32
         _,_,map_h,map_w = reconst_img.shape
-        #reconst_img = reconst_img.movedim(1,3).view(batch_size,map_h,map_w,8,8,3).movedim(2,3).view(batch_size,map_h*8,map_w*8,3)
+        reconst_img = reconst_img.movedim(1,3).reshape(batch_size,map_h,map_w,8,8,3).movedim(2,3).reshape(batch_size,map_h*8,map_w*8,3).movedim(3,1)
         return reconst_img, total_bu_loss, total_td_loss
 
 

@@ -7,10 +7,13 @@ import datetime
 from glom import GLOM
 from dataloader import Dataset
 
+import wandb
+
 from absl import flags, app
 
 FLAGS = flags.FLAGS
 
+flags.DEFINE_string('exp','test','')
 flags.DEFINE_integer('batch_size',1,'')
 flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('min_crop_size',8,'Minimum size of cropped region')
@@ -27,6 +30,7 @@ flags.DEFINE_float('lr',0.0003,'Learning Rate')
 flags.DEFINE_float('reg_coeff',0.1,'Regularization coefficient used for regularization loss')
 
 flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
+flags.DEFINE_integer('timesteps',10,'Number of timesteps')
 flags.DEFINE_integer('min_emb_size',64,'Embedding size of the lowest level embedding')
 flags.DEFINE_integer('min_patch_size',8,'Patch size of each location at lowest level')
 flags.DEFINE_integer('max_patch_size',32,'Patch size of the upper levels')
@@ -38,6 +42,13 @@ flags.DEFINE_integer('num_reconst',3,'Number of layers for reconstruction CNN')
 
 def main(argv):
     start = datetime.datetime.now()
+
+    wandb.init(project="glom",name=FLAGS.exp)
+    wandb.save("train.py")
+    wandb.save("glom.py")
+    wandb.save("dataloader.py")
+    wandb.save("utils.py")
+    wandb.config.update(flags.FLAGS)
 
     train_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/nature_landscape/*/*.jpg")
     #val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
@@ -82,8 +93,10 @@ def main(argv):
         optimizer.step()
 
         train_iter += 1
-        print("Train Iteration {}; Reconstruction Loss {}; Bottom-Up {}; Top-Down {}".format(train_iter,reconstruction_loss,bottom_up_loss,top_down_loss))
-
+        log_dict = {"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss":reconstruction_loss, 
+                    "Bottom-Up Loss": bottom_up_loss, "Top-Down Loss":top_down_loss}
+        print(log_dict)
+        wandb.log(log_dict)
 
 
 if __name__ == '__main__':
