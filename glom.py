@@ -44,13 +44,15 @@ class GLOM(nn.Module):
 
         self.num_contribs = [4. for level in range(self.num_levels)]
         self.num_contribs[0] = self.num_contribs[-1] = 3.
+        self.bu_weighting = [w*0.2+0.8 for w in range(10,0,-1)]
+        self.td_weighting = [w*0.1 for w in range(1,11)]
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
         self.attention_std = 3
         self.num_samples = 20
 
-        self.zero_tensor = torch.zeros(1, device='cuda')
+        self.zero_tensor = torch.zeros([1,1], device='cuda')
 
         stds = np.arange(0,128,dtype=np.float32)/self.attention_std
         stds = np.tile(stds.reshape(128,1),(1,128)).reshape(128,128,1)
@@ -230,8 +232,9 @@ class GLOM(nn.Module):
         #return dot_prod
         return F.mse_loss(preds,level_embds)
 
-    def update_embeddings(self, level_embds):
+    def update_embeddings(self, level_embds, ts):
         level_deltas = []
+        level_norms = []
         bu_loss = []
         td_loss = []
         for level in range(self.num_levels):
@@ -244,7 +247,12 @@ class GLOM(nn.Module):
             #    print(level, prev_timestep[0,:,3,3])
 
             # The embedding at each timestep is the average of 4 contributions (see pg. 3)
-            level_embds[level] = (0.2*bottom_up+0.2*top_down+attention_embd+2.6*prev_timestep)/4.
+            if level in [1,2,3]:
+                level_embds[level] = (self.bu_weighting[ts]*bottom_up + self.td_weighting[ts]*top_down + self.td_weighting[ts]*attention_embd + prev_timestep)/4.
+            elif level==0:
+                level_embds[level] = (self.td_weighting[ts]*top_down + self.td_weighting[ts]*attention_embd + self.bu_weighting[ts]*prev_timestep)/3.
+            else:
+                level_embds[level] = ((2.-self.td_weighting[ts])*bottom_up + self.td_weighting[ts]*attention_embd + prev_timestep)/3.
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
             if level > 0:
@@ -256,8 +264,9 @@ class GLOM(nn.Module):
             # certain threshold the embedding updates are stopped.
             with torch.no_grad():
                 level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
+                level_norms.append((torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean(),torch.norm(attention_embd,dim=1).mean()))
 
-        return level_embds, level_deltas, bu_loss, td_loss
+        return level_embds, level_deltas, level_norms, bu_loss, td_loss
 
     def forward(self, img):
         batch_size,chans,height,width = img.shape
@@ -271,22 +280,26 @@ class GLOM(nn.Module):
 
         total_bu_loss, total_td_loss = 0.,0.
         delta_log = []
+        norms_log = []
+        bu_log = []
+        td_log = []
         # Keep on updating embeddings until they settle on constant value.
         for t in range(FLAGS.timesteps):
-            level_embds, deltas, bu_loss, td_loss = self.update_embeddings(level_embds)
+            level_embds, deltas, norms, bu_loss, td_loss = self.update_embeddings(level_embds, t)
             total_bu_loss += sum(bu_loss)/(FLAGS.timesteps*self.num_levels)
             total_td_loss += sum(td_loss)/(FLAGS.timesteps*self.num_levels)
             #print(sum(deltas))
             #if sum(deltas) < self.delta_thresh:
             #    break
             if t in [0,1,2,5,9]:
-                delta_log.append((deltas[0],deltas[-1]))
+                delta_log.append((deltas[0],deltas[2],deltas[-1]))
+                norms_log.append((norms[0],norms[2],norms[-1]))
+                bu_log.append((bu_loss[0],bu_loss[2],bu_loss[-1]))
+                td_log.append((td_loss[0],td_loss[2],td_loss[-1]))
 
         reconst_img = self.reconstruction_net(level_embds[0]) # N,192,32,32
-        total_bu_loss = total_td_loss = 0.
-        delta_log = []
         _,_,map_h,map_w = reconst_img.shape
         #reconst_img = reconst_img.movedim(1,3).reshape(batch_size,map_h,map_w,8,8,3).movedim(2,3).reshape(batch_size,map_h*8,map_w*8,3).movedim(3,1)
-        return reconst_img, total_bu_loss, total_td_loss, delta_log
+        return reconst_img, total_bu_loss, total_td_loss, delta_log, norms_log, bu_log, td_log
 
 

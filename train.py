@@ -90,7 +90,7 @@ def main(argv):
             masked_image = masked_load.to('cuda')
             target_image = target_load.to('cuda')
 
-            reconstructed_image, bottom_up_loss, top_down_loss, delta_log = model(masked_image)
+            reconstructed_image, bottom_up_loss, top_down_loss, delta_log, norms_log, bu_log, td_log = model(masked_image)
             reconstruction_loss = loss_func(target_image,reconstructed_image)
             final_loss = reconstruction_loss + FLAGS.reg_coeff*(bottom_up_loss+top_down_loss)
 
@@ -109,13 +109,29 @@ def main(argv):
                 #print(total_loss/100)
                 #total_loss = 0.
 
-            for ts,ts_delta in zip([0,1,2,5,9],delta_log):
+            for ts,ts_delta,ts_norm,ts_bu,ts_td in zip([0,1,2,5,9],delta_log, norms_log, bu_log, td_log ):
                 log_dict['delta_l1_t{}'.format(ts)] = ts_delta[0]
-                log_dict['delta_l5_t{}'.format(ts)] = ts_delta[1]
+                log_dict['delta_l3_t{}'.format(ts)] = ts_delta[1]
+                log_dict['delta_l5_t{}'.format(ts)] = ts_delta[2]
+                log_dict['bu_norm_l1_t{}'.format(ts)] = ts_norm[0][0]
+                log_dict['bu_norm_l3_t{}'.format(ts)] = ts_norm[1][0]
+                log_dict['bu_norm_l5_t{}'.format(ts)] = ts_norm[2][0]
+                log_dict['td_norm_l1_t{}'.format(ts)] = ts_norm[0][1]
+                log_dict['td_norm_l3_t{}'.format(ts)] = ts_norm[1][1]
+                log_dict['td_norm_l5_t{}'.format(ts)] = ts_norm[2][1]
+                log_dict['att_norm_l1_t{}'.format(ts)] = ts_norm[0][2]
+                log_dict['att_norm_l3_t{}'.format(ts)] = ts_norm[1][2]
+                log_dict['att_norm_l5_t{}'.format(ts)] = ts_norm[2][2]
+                log_dict['bu_loss_l1_t{}'.format(ts)] = ts_bu[0]
+                log_dict['bu_loss_l3_t{}'.format(ts)] = ts_bu[1]
+                log_dict['bu_loss_l5_t{}'.format(ts)] = ts_bu[2]
+                log_dict['td_loss_l1_t{}'.format(ts)] = ts_td[0]
+                log_dict['td_loss_l3_t{}'.format(ts)] = ts_td[1]
+                log_dict['td_loss_l5_t{}'.format(ts)] = ts_td[2]
 
             wandb.log(log_dict)
 
-            if train_iter > 10000 and train_iter%100==0:
+            '''if train_iter > 10000 and train_iter%100==0:
                 imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
                 imshow = np.clip(imshow,0,255)
                 imshow = imshow.astype(np.uint8)
@@ -129,7 +145,7 @@ def main(argv):
                     exit()
 
                 #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.min_emb_size))
-                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.min_emb_size))
+                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.min_emb_size))'''
 
         
 
