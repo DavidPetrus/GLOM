@@ -27,7 +27,7 @@ class Dataset(torch.utils.data.Dataset):
         img = resize_image(img)
         img = normalize_image(img)
         img = torch.from_numpy(np.ascontiguousarray(img))
-        masked_img, mask = mask_random_crop(img)
+        masked_img, mask = mask_random_crop(img.detach().clone())
         net_input = torch.cat([masked_img, mask], dim=2)
 
         return torch.movedim(net_input,2,0), torch.movedim(img,2,0)

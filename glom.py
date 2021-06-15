@@ -59,6 +59,7 @@ class GLOM(nn.Module):
         probs = scipy.stats.norm.cdf(dists+1/self.attention_std)-scipy.stats.norm.cdf(dists)
         np.fill_diagonal(probs,0.)
         self.probs = torch.tensor(np.reshape(probs,(128,128,128,128)),device='cuda')
+        self.probs[self.probs < 0.] = 0.
 
         # Threshold used to determine when to stop updating the embeddings
         self.delta_thresh = 10.
@@ -131,12 +132,14 @@ class GLOM(nn.Module):
 
     def build_input_cnn(self):
         # Input CNN used to initialize the embeddings at each of the levels (see pg 13: 3.5 The Visual Input)
-        cnn_channels = [4,16,32,self.min_emb_size]
+        cnn_channels = [4,self.min_emb_size//4,self.min_emb_size//2,self.min_emb_size]
         cnn_layers = []
         for l in range(self.num_input_layers):
-            cnn_layers.append(('cnn_conv_inp{}'.format(l), nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)))
+            cnn_layers.append(('cnn_conv_inp_s1{}'.format(l), nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=1,padding=1)))
+            cnn_layers.append(('cnn_act_inp_s1{}'.format(l), nn.Hardswish(inplace=True)))
+            cnn_layers.append(('cnn_conv_inp_s2{}'.format(l), nn.Conv2d(cnn_channels[l+1],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)))
             if l < self.num_input_layers-1:
-                cnn_layers.append(('cnn_act_inp{}'.format(l), nn.Hardswish(inplace=True)))
+                cnn_layers.append(('cnn_act_inp_s2{}'.format(l), nn.Hardswish(inplace=True)))
 
         #for l in range(self.num_input_layers, self.num_input_layers+self.num_levels):
         #    cnn_layers['cnn_conv_lev{}'.format(l)] = nn.Conv2d(cnn_channels[l-1],cnn_channels[l],kernel_size=3,
@@ -147,12 +150,17 @@ class GLOM(nn.Module):
 
     def build_reconstruction_net(self):
         # CNN used to reconstruct the input image (and the missing pixels) using the embeddings from the bottom level.
-        reconst_chans = [self.min_emb_size,128,256,192]
+        reconst_chans = [self.min_emb_size,int(self.min_emb_size*1.5),self.min_emb_size,self.min_emb_size//2]
         reconst_layers = []
         for l in range(self.num_reconst):
-            reconst_layers.append(('reconst_dense{}'.format(l), nn.Conv2d(reconst_chans[l],reconst_chans[l+1],kernel_size=1,stride=1)))
-            if l < self.num_reconst-1:
-                reconst_layers.append(('reconst_act{}'.format(l), nn.Hardswish(inplace=True)))
+            reconst_layers.append(('reconst_conv{}'.format(l), nn.Conv2d(reconst_chans[l],reconst_chans[l+1],kernel_size=3,stride=1,padding=1)))
+            reconst_layers.append(('reconst_conv_act{}'.format(l), nn.Hardswish(inplace=True)))
+            reconst_layers.append(('reconst_trans{}'.format(l), nn.ConvTranspose2d(reconst_chans[l+1],reconst_chans[l+1],kernel_size=4,stride=2,padding=1)))
+            reconst_layers.append(('reconst_act{}'.format(l), nn.Hardswish(inplace=True)))
+
+        reconst_layers.append(('reconst_conv_out', nn.Conv2d(self.min_emb_size//2,self.min_emb_size//2,kernel_size=3,stride=1,padding=1)))
+        reconst_layers.append(('reconst_conv_act_out', nn.Hardswish(inplace=True)))
+        reconst_layers.append(('reconst_final', nn.Conv2d(self.min_emb_size//2,3,kernel_size=3,stride=1,padding=1)))
 
         return nn.Sequential(OrderedDict(reconst_layers))
 
@@ -214,12 +222,13 @@ class GLOM(nn.Module):
         if FLAGS.add_predictor:
             preds = self.pred_net[level](preds)
 
-        if FLAGS.l2_normalize:
-            preds = F.normalize(preds, dim=1)
-            level_embds = F.normalize(level_embds, dim=1)
+        #if FLAGS.l2_normalize:
+        #    preds = F.normalize(preds, dim=1)
+        #    level_embds = F.normalize(level_embds, dim=1)
 
-        dot_prod = (preds*level_embds).sum(1)
-        return dot_prod
+        #dot_prod = (preds*level_embds).sum(1)
+        #return dot_prod
+        return F.mse_loss(preds,level_embds)
 
     def update_embeddings(self, level_embds):
         level_deltas = []
@@ -230,32 +239,38 @@ class GLOM(nn.Module):
             top_down = self.top_down(level_embds[level+1],level) if level < self.num_levels-1 else self.zero_tensor
             attention_embd = self.attend_to_level(level_embds[level])
             prev_timestep = level_embds[level]
-            #print(bottom_up.mean(),top_down.mean(),attention_embd.mean(),prev_timestep.mean())
+            #if level in [0,1,3]:
+            #    #print(level,bottom_up.norm(dim=1).mean(),top_down.norm(dim=1).mean(),attention_embd.norm(dim=1).mean(),prev_timestep.norm(dim=1).mean())
+            #    print(level, prev_timestep[0,:,3,3])
 
             # The embedding at each timestep is the average of 4 contributions (see pg. 3)
-            level_embds[level] = (bottom_up+top_down+attention_embd+prev_timestep)/self.num_contribs[level]
+            level_embds[level] = (0.2*bottom_up+0.2*top_down+attention_embd+2.6*prev_timestep)/4.
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
             if level > 0:
-                bu_loss.append((1.-self.similarity(level_embds[level].detach(), bottom_up, level)).mean())
+                bu_loss.append(self.similarity(level_embds[level].detach(), bottom_up, level))
             if level < self.num_levels-1:
-                td_loss.append((1.-self.similarity(level_embds[level].detach(), top_down, level)).mean())
+                td_loss.append(self.similarity(level_embds[level].detach(), top_down, level))
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
-            #level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
+            with torch.no_grad():
+                level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
 
         return level_embds, level_deltas, bu_loss, td_loss
 
     def forward(self, img):
         batch_size,chans,height,width = img.shape
-        print(img.shape)
+        #print(img.shape)
         embd_input = self.input_cnn(img)
         level_embds = [embd_input]
+        #print(level_embds[-1].norm(dim=1).mean())
         for level in range(1,self.num_levels):
             level_embds.append(self.bottom_up_net[level-1](level_embds[-1]))
+            #print(level_embds[-1].norm(dim=1).mean())
 
         total_bu_loss, total_td_loss = 0.,0.
+        delta_log = []
         # Keep on updating embeddings until they settle on constant value.
         for t in range(FLAGS.timesteps):
             level_embds, deltas, bu_loss, td_loss = self.update_embeddings(level_embds)
@@ -264,10 +279,14 @@ class GLOM(nn.Module):
             #print(sum(deltas))
             #if sum(deltas) < self.delta_thresh:
             #    break
+            if t in [0,1,2,5,9]:
+                delta_log.append((deltas[0],deltas[-1]))
 
         reconst_img = self.reconstruction_net(level_embds[0]) # N,192,32,32
+        total_bu_loss = total_td_loss = 0.
+        delta_log = []
         _,_,map_h,map_w = reconst_img.shape
-        reconst_img = reconst_img.movedim(1,3).reshape(batch_size,map_h,map_w,8,8,3).movedim(2,3).reshape(batch_size,map_h*8,map_w*8,3).movedim(3,1)
-        return reconst_img, total_bu_loss, total_td_loss
+        #reconst_img = reconst_img.movedim(1,3).reshape(batch_size,map_h,map_w,8,8,3).movedim(2,3).reshape(batch_size,map_h*8,map_w*8,3).movedim(3,1)
+        return reconst_img, total_bu_loss, total_td_loss, delta_log
 
 
