@@ -91,7 +91,7 @@ def main(argv):
             masked_image = masked_load.to('cuda')
             target_image = target_load.to('cuda')
 
-            reconstructed_image, bottom_up_loss, top_down_loss, delta_log, norms_log, bu_log, td_log = model(masked_image)
+            reconstructed_image, bottom_up_loss, top_down_loss, delta_log, norms_log, bu_log, td_log, level_embds = model(masked_image)
             reconstruction_loss = 0.001*loss_func(target_image,reconstructed_image)
             final_loss = reconstruction_loss + FLAGS.reg_coeff*(bottom_up_loss+top_down_loss)
 
@@ -132,7 +132,10 @@ def main(argv):
 
             wandb.log(log_dict)
 
-            '''if train_iter > 10000 and train_iter%100==0:
+            if train_iter > 10000 and train_iter%100==0:
+
+
+
                 imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
                 imshow = np.clip(imshow,0,255)
                 imshow = imshow.astype(np.uint8)
@@ -145,8 +148,9 @@ def main(argv):
                     cv2.destroyAllWindows()
                     exit()
 
-                torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.min_emb_size))
-                torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.min_emb_size))'''
+                #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.min_emb_size))
+                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.min_emb_size))
+                torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
 
         
 

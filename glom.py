@@ -66,19 +66,41 @@ class GLOM(nn.Module):
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
-        self.attention_std = 3
         self.num_samples = 20
 
         self.zero_tensor = torch.zeros([1,1], device='cuda')
 
-        stds = np.arange(0,128,dtype=np.float32)/self.attention_std
-        stds = np.tile(stds.reshape(128,1),(1,128)).reshape(128,128,1)
+        att_std = 1.
+        stds = np.arange(0,64,dtype=np.float32)/att_std
+        stds = np.tile(stds.reshape(64,1),(1,64)).reshape(64,64,1)
         std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
         dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
-        probs = scipy.stats.norm.cdf(dists+1/self.attention_std)-scipy.stats.norm.cdf(dists)
+        probs = scipy.stats.norm.cdf(dists+1/att_std)-scipy.stats.norm.cdf(dists)
         np.fill_diagonal(probs,0.)
-        self.probs = torch.tensor(np.reshape(probs,(128,128,128,128)),device='cuda')
-        self.probs[self.probs < 0.] = 0.
+        probs_1 = torch.tensor(np.reshape(probs,(64,64,64,64)),device='cuda')
+        probs_1[probs_1 < 0.] = 0.
+
+        att_std = 2.
+        stds = np.arange(0,32,dtype=np.float32)/att_std
+        stds = np.tile(stds.reshape(32,1),(1,32)).reshape(32,32,1)
+        std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
+        dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
+        probs = scipy.stats.norm.cdf(dists+1/att_std)-scipy.stats.norm.cdf(dists)
+        np.fill_diagonal(probs,0.)
+        probs_2 = torch.tensor(np.reshape(probs,(32,32,32,32)),device='cuda')
+        probs_2[probs_2 < 0.] = 0.
+
+        att_std = 4.
+        stds = np.arange(0,32,dtype=np.float32)/att_std
+        stds = np.tile(stds.reshape(32,1),(1,32)).reshape(32,32,1)
+        std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
+        dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
+        probs = scipy.stats.norm.cdf(dists+1/att_std)-scipy.stats.norm.cdf(dists)
+        np.fill_diagonal(probs,0.)
+        probs_4 = torch.tensor(np.reshape(probs,(32,32,32,32)),device='cuda')
+        probs_4[probs_4 < 0.] = 0.
+
+        self.probs = [None,probs_1,probs_1,probs_2,probs_4]
 
         # Threshold used to determine when to stop updating the embeddings
         self.delta_thresh = 10.
@@ -258,19 +280,19 @@ class GLOM(nn.Module):
         
         return self.top_down_net[level](cat_embds)
     
-    def sample_locations(self, embeddings):
+    def sample_locations(self, embeddings, level):
         batch_size,embd_size,h,w = embeddings.shape
 
         # Randomly sample other locations on the same level to attend to (described on pg 16, final paragraph of 6: Replicating Islands)
-        sampled_idxs = torch.multinomial(self.probs[:h,:w,:h,:w].reshape(h*w,h*w), self.num_samples)
+        sampled_idxs = torch.multinomial(self.probs[level][:h,:w,:h,:w].reshape(h*w,h*w), self.num_samples)
         values = embeddings.reshape(embd_size,h*w)[:,sampled_idxs.reshape(h*w*self.num_samples)].reshape(1,embd_size,h,w,self.num_samples)
         return values
 
-    def attend_to_level(self, embeddings, temperature=1.):
+    def attend_to_level(self, embeddings, level, temperature=1.):
         batch_size,embd_size,h,w = embeddings.shape
 
         # Implementation of the attention mechanism described on pg 13
-        values = self.sample_locations(embeddings)
+        values = self.sample_locations(embeddings, level)
         product = values * embeddings.reshape(batch_size,embd_size,h,w,1)
         dot_prod = product.sum(1,keepdim=True)
         weights = F.softmax(dot_prod/temperature, dim=4)
@@ -303,7 +325,7 @@ class GLOM(nn.Module):
         for level in range(self.num_levels):
             bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1])) if level > 0 else self.zero_tensor
             top_down = self.out_norm[level](self.top_down(level_embds[level+1],level)) if level < self.num_levels-1 else self.zero_tensor
-            attention_embd = self.attend_to_level(level_embds[level])
+            attention_embd = self.attend_to_level(level_embds[level], level) if level > 0 else self.zero_tensor
             prev_timestep = level_embds[level]
             #if level in [0,1,3]:
             #    #print(level,bottom_up.norm(dim=1).mean(),top_down.norm(dim=1).mean(),attention_embd.norm(dim=1).mean(),prev_timestep.norm(dim=1).mean())
@@ -313,7 +335,8 @@ class GLOM(nn.Module):
             if level in [1,2,3]:
                 level_embds[level] = (self.bu_weighting[ts]*bottom_up + self.td_weighting[ts]*top_down + self.td_weighting[ts]*attention_embd + prev_timestep)/4.
             elif level==0:
-                level_embds[level] = (self.td_weighting[ts]*top_down + self.td_weighting[ts]*attention_embd + prev_timestep + (self.bu_weighting[ts]-1)*embd_input)/3.
+                #level_embds[level] = (self.td_weighting[ts]*top_down + self.td_weighting[ts]*attention_embd + prev_timestep + (self.bu_weighting[ts]-1)*embd_input)/3.
+                level_embds[level] = (top_down + 3*prev_timestep)/4.
             else:
                 level_embds[level] = ((2.-self.td_weighting[ts])*bottom_up + self.td_weighting[ts]*attention_embd + prev_timestep)/3.
 
@@ -362,7 +385,7 @@ class GLOM(nn.Module):
 
         reconst_img = self.reconstruct_image(level_embds[0])
 
-        return reconst_img, total_bu_loss, total_td_loss, delta_log, norms_log, bu_log, td_log
+        return reconst_img, total_bu_loss, total_td_loss, delta_log, norms_log, bu_log, td_log, level_embds
         #return reconst_img, 0., 0., [], [], [], []
 
 
