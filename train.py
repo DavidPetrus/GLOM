@@ -23,6 +23,7 @@ flags.DEFINE_bool('joint_patch_reconstruction',False,'Whether to reconstruct eac
 
 # Contrastive learning flags
 flags.DEFINE_bool('add_predictor',False,'Whether to add predictor MLP')
+flags.DEFINE_bool('sep_preds', False, '')
 flags.DEFINE_bool('l2_normalize',True,'L2 normalize embeddings before calculating contrastive loss.')
 flags.DEFINE_string('layer_norm','out','bu,bu_and_td,out,none')
 
@@ -73,7 +74,7 @@ def main(argv):
 
     optimizer = torch.optim.Adam(params=model.parameters(),lr=FLAGS.lr)
 
-    loss_func = torch.nn.MSELoss(reduction='mean')
+    loss_func = torch.nn.MSELoss(reduction='sum')
 
     model.to('cuda')
     model.train()
@@ -91,7 +92,7 @@ def main(argv):
             target_image = target_load.to('cuda')
 
             reconstructed_image, bottom_up_loss, top_down_loss, delta_log, norms_log, bu_log, td_log = model(masked_image)
-            reconstruction_loss = loss_func(target_image,reconstructed_image)
+            reconstruction_loss = 0.001*loss_func(target_image,reconstructed_image)
             final_loss = reconstruction_loss + FLAGS.reg_coeff*(bottom_up_loss+top_down_loss)
 
             # Calculate gradients of the weights
@@ -132,10 +133,10 @@ def main(argv):
             wandb.log(log_dict)
 
             '''if train_iter > 10000 and train_iter%100==0:
-                imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
+                imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
                 imshow = np.clip(imshow,0,255)
                 imshow = imshow.astype(np.uint8)
-                targ = target_image[0].detach().movedim(0,2).cpu().numpy() * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
+                targ = target_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
                 targ = targ.astype(np.uint8)
                 cv2.imshow('pred',imshow)
                 cv2.imshow('target',targ)
@@ -144,8 +145,8 @@ def main(argv):
                     cv2.destroyAllWindows()
                     exit()
 
-                #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.min_emb_size))
-                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.min_emb_size))'''
+                torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.min_emb_size))
+                torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.min_emb_size))'''
 
         
 

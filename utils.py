@@ -20,8 +20,9 @@ def resize_image(image):
 
 def normalize_image(image):
     image = image.astype(np.float32)
-    image -= IMAGENET_DEFAULT_MEAN
-    image /= IMAGENET_DEFAULT_STD
+    #image -= IMAGENET_DEFAULT_MEAN
+    #image /= IMAGENET_DEFAULT_STD
+    image /= 255.
 
     return image
 
