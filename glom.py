@@ -53,9 +53,10 @@ class GLOM(nn.Module):
         self.num_reconst = num_reconst
         self.num_pos_freqs = 8
         self.td_w0 = 30
+        self.temperature = FLAGS.temperature
 
-        self.bu_weighting = [2.0,1.8,1.6,1.4,1.2,1.,1.,1.,1.,1.]
-        self.td_weighting = [0.5,0.6,0.7,0.8,0.9,1.,1.,1.,1.,1.]
+        self.bu_weighting = [2.0,1.8,1.6,1.4,1.2] + [1. for t in range(FLAGS.timesteps-5)]
+        self.td_weighting = [0.5,0.6,0.7,0.8,0.9] + [1. for t in range(FLAGS.timesteps-5)]
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
@@ -261,14 +262,14 @@ class GLOM(nn.Module):
         values = embeddings.reshape(embd_size,h*w)[:,sampled_idxs.reshape(h*w*self.num_samples)].reshape(1,embd_size,h,w,self.num_samples)
         return values
 
-    def attend_to_level(self, embeddings, level, temperature=0.3):
+    def attend_to_level(self, embeddings, level):
         batch_size,embd_size,h,w = embeddings.shape
 
         # Implementation of the attention mechanism described on pg 13
         values = self.sample_locations(embeddings, level)
         product = values * embeddings.reshape(batch_size,embd_size,h,w,1)
         dot_prod = product.sum(1,keepdim=True)
-        weights = F.softmax(dot_prod/(temperature*embd_size**0.5), dim=4)
+        weights = F.softmax(dot_prod/(self.temperature*embd_size**0.5), dim=4)
         prod = values*weights
         return prod.sum(4)
 
@@ -298,9 +299,6 @@ class GLOM(nn.Module):
             top_down = self.out_norm[level](self.top_down(level_embds[level+1], level)) if level < self.num_levels-1 else self.zero_tensor
             attention_embd = self.attend_to_level(level_embds[level], level) if level > 0 else self.zero_tensor
             prev_timestep = level_embds[level]
-            #if level in [0,1,3]:
-            #    #print(level,bottom_up.norm(dim=1).mean(),top_down.norm(dim=1).mean(),attention_embd.norm(dim=1).mean(),prev_timestep.norm(dim=1).mean())
-            #    print(level, prev_timestep[0,:,3,3])
 
             # The embedding at each timestep is the average of 4 contributions (see pg. 3)
             if level in [1,2,3]:
@@ -314,10 +312,11 @@ class GLOM(nn.Module):
                 level_embds[level] = ((2.-self.td_weighting[ts])*bottom_up + self.td_weighting[ts]*attention_embd + prev_timestep)/3.
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            if level > 0:
-                bu_loss.append(self.similarity(level_embds[level].detach(), bottom_up, level, bu=True))
-            if level < self.num_levels-1:
-                td_loss.append(self.similarity(level_embds[level].detach(), top_down, level, bu=False))
+            if ts >= 5:
+                if level > 0:
+                    bu_loss.append(self.similarity(level_embds[level].detach(), bottom_up, level, bu=True))
+                if 0 < level < self.num_levels-1:
+                    td_loss.append(self.similarity(level_embds[level].detach(), top_down, level, bu=False))
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
@@ -330,11 +329,13 @@ class GLOM(nn.Module):
     def forward(self, img):
         batch_size,chans,height,width = img.shape
         #print(img.shape)
-        embd_input = self.out_norm[0](self.input_cnn(img))
+        with torch.set_grad_enabled(FLAGS.train_input_cnn):
+            embd_input = self.out_norm[0](self.input_cnn(img))
+
         level_embds = [embd_input.clone()]
         #print(level_embds[-1].norm(dim=1).mean())
         for level in range(1,self.num_levels):
-            level_embds.append(self.bottom_up_net[level-1](level_embds[-1]))
+            level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
             #print(level_embds[-1].norm(dim=1).mean())
 
         total_bu_loss, total_td_loss = 0.,0.
@@ -345,20 +346,32 @@ class GLOM(nn.Module):
         # Keep on updating embeddings until they settle on constant value.
         for t in range(FLAGS.timesteps):
             level_embds, deltas, norms, bu_loss, td_loss = self.update_embeddings(level_embds, t, embd_input)
-            total_bu_loss += sum(bu_loss)/(FLAGS.timesteps*self.num_levels)
-            total_td_loss += sum(td_loss)/(FLAGS.timesteps*self.num_levels)
+            if t >= 5:
+                total_bu_loss += sum(bu_loss)/(0.5*FLAGS.timesteps*(self.num_levels-1))
+                total_td_loss += sum(td_loss)/(0.5*FLAGS.timesteps*(self.num_levels-2))
             #print(sum(deltas))
             #if sum(deltas) < self.delta_thresh:
             #    break
-            if t in [0,1,2,5,9]:
+            if t in [0,1,2,5,9,14,19]:
                 delta_log.append((deltas[0],deltas[2],deltas[-1]))
                 norms_log.append((norms[0],norms[2],norms[-1]))
+            if t >= 5:
                 bu_log.append((bu_loss[0],bu_loss[2],bu_loss[-1]))
                 td_log.append((td_loss[0],td_loss[2],td_loss[-1]))
 
-        reconst_img = self.reconstruct_image(level_embds[0])
+        if FLAGS.all_lev_reconst:
+            reconst_embd = level_embds[0]
+            for level in range(1,self.num_levels):
+                inp_embd = level_embds[level]
+                for td_lev in range(level,0,-1):
+                    inp_embd = self.out_norm[td_lev-1](self.top_down(inp_embd, td_lev-1))
+                reconst_embd = reconst_embd + inp_embd
+            reconst_embd = reconst_embd/self.num_levels
+            reconst_img = self.reconstruct_image(reconst_embd)
+        else:
+            reconst_img = self.reconstruct_image(level_embds[0])
 
         return reconst_img, total_bu_loss, total_td_loss, delta_log, norms_log, bu_log, td_log, level_embds
-        #return reconst_img, 0., 0., [], [], [], []
+        #return reconst_img, 0., 0., [], [], [], [], 0.
 
 
