@@ -39,18 +39,13 @@ class Sine(nn.Module):
 
 class GLOM(nn.Module):
 
-    def __init__(self, num_levels=5, min_emb_size=64, patch_size=(8,32), bottom_up_layers=3, top_down_layers=3, num_input_layers=3, num_reconst=3):
+    def __init__(self, num_levels=5, embd_mult=16, granularity=[8,8,8,16,32], bottom_up_layers=3, top_down_layers=3, num_input_layers=3, num_reconst=3):
         super(GLOM, self).__init__()
 
         self.num_levels = num_levels
-        self.min_patch_size = patch_size[0]
-        self.max_patch_size = patch_size[1]
-        self.min_emb_size = min_emb_size
-        self.max_emb_size = int(self.max_patch_size/self.min_patch_size)*min_emb_size
-
-        self.strides = [2 if l < np.log2(self.max_patch_size/self.min_patch_size) else 1 for l in range(self.num_levels)]
-        self.level_res = [min(self.min_patch_size * 2**l, self.max_patch_size) for l in range(num_levels)]
-        self.embd_dims = [min(min_emb_size * 2**l, self.max_emb_size) for l in range(num_levels)]
+        self.granularity = granularity
+        self.strides = [2 if self.granularity[l]<self.granularity[l+1] else 1 for l in range(self.num_levels-1)]
+        self.embd_dims = [embd_mult*patch_size for patch_size in granularity]
 
         self.bottom_up_layers = bottom_up_layers
         self.top_down_layers = top_down_layers
@@ -59,10 +54,8 @@ class GLOM(nn.Module):
         self.num_pos_freqs = 8
         self.td_w0 = 30
 
-        self.num_contribs = [4. for level in range(self.num_levels)]
-        self.num_contribs[0] = self.num_contribs[-1] = 3.
-        self.bu_weighting = [w*0.2+0.8 for w in range(10,0,-1)]
-        self.td_weighting = [w*0.1 for w in range(1,11)]
+        self.bu_weighting = [2.0,1.8,1.6,1.4,1.2,1.,1.,1.,1.,1.]
+        self.td_weighting = [0.5,0.6,0.7,0.8,0.9,1.,1.,1.,1.,1.]
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
@@ -70,43 +63,27 @@ class GLOM(nn.Module):
 
         self.zero_tensor = torch.zeros([1,1], device='cuda')
 
-        att_std = 1.
-        stds = np.arange(0,64,dtype=np.float32)/att_std
-        stds = np.tile(stds.reshape(64,1),(1,64)).reshape(64,64,1)
-        std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
-        dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
-        probs = scipy.stats.norm.cdf(dists+1/att_std)-scipy.stats.norm.cdf(dists)
-        np.fill_diagonal(probs,0.)
-        probs_1 = torch.tensor(np.reshape(probs,(64,64,64,64)),device='cuda')
-        probs_1[probs_1 < 0.] = 0.
+        att_stds = [int(1/self.granularity[l]*2**(l+3)) for l in range(1,self.num_levels)]
+        self.probs = {}
+        for l,patch_size in zip(range(1,self.num_levels), self.granularity[1:]):
+            if l > 1 and std == att_stds[l-1]:
+                self.probs[l] = self.probs[l-1]
+                continue
 
-        att_std = 2.
-        stds = np.arange(0,32,dtype=np.float32)/att_std
-        stds = np.tile(stds.reshape(32,1),(1,32)).reshape(32,32,1)
-        std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
-        dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
-        probs = scipy.stats.norm.cdf(dists+1/att_std)-scipy.stats.norm.cdf(dists)
-        np.fill_diagonal(probs,0.)
-        probs_2 = torch.tensor(np.reshape(probs,(32,32,32,32)),device='cuda')
-        probs_2[probs_2 < 0.] = 0.
-
-        att_std = 4.
-        stds = np.arange(0,32,dtype=np.float32)/att_std
-        stds = np.tile(stds.reshape(32,1),(1,32)).reshape(32,32,1)
-        std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
-        dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
-        probs = scipy.stats.norm.cdf(dists+1/att_std)-scipy.stats.norm.cdf(dists)
-        np.fill_diagonal(probs,0.)
-        probs_4 = torch.tensor(np.reshape(probs,(32,32,32,32)),device='cuda')
-        probs_4[probs_4 < 0.] = 0.
-
-        self.probs = [None,probs_1,probs_1,probs_2,probs_4]
-
-        # Threshold used to determine when to stop updating the embeddings
-        self.delta_thresh = 10.
+            std = att_stds[l-1]
+            grid_size = 512//patch_size
+            stds = np.arange(0,grid_size,dtype=np.float32)/std
+            stds = np.tile(stds.reshape(grid_size,1),(1,grid_size)).reshape(grid_size,grid_size,1)
+            std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
+            dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
+            probs = scipy.stats.norm.cdf(dists+1/std)-scipy.stats.norm.cdf(dists)
+            np.fill_diagonal(probs,0.)
+            probs = torch.tensor(np.reshape(probs,(grid_size,grid_size,grid_size,grid_size)),device='cuda')
+            probs[probs < 0.] = 0.
+            self.probs[l] = probs
 
         self.build_model()
-        self.out_norm = nn.ModuleList([nn.InstanceNorm2d(self.embd_dims[level], affine=True) for level in range(self.num_levels)])
+        self.out_norm = nn.ModuleList([nn.InstanceNorm2d(self.embd_dims[level], affine=FLAGS.affine) for level in range(self.num_levels)])
 
 
     def build_model(self):
@@ -150,8 +127,6 @@ class GLOM(nn.Module):
                 if FLAGS.layer_norm != 'none':
                     encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
                 encoder_layers.append(('enc_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
-            #elif FLAGS.layer_norm == 'out':
-            #    encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
 
         return nn.Sequential(OrderedDict(encoder_layers))
 
@@ -171,15 +146,13 @@ class GLOM(nn.Module):
         fan_in = self.embd_dims[level+1]
         for layer in range(1,self.top_down_layers):
             decoder_layers.append(('dec_lev{}_{}'.format(level,layer), nn.Conv2d(fan_in,self.embd_dims[level],kernel_size=1,stride=1)))
-            nn.init.uniform_(decoder_layers[-1][1].weight, -(6/fan_in)**0.5, (6/self.embd_dims[level])**0.5)
+            #nn.init.uniform_(decoder_layers[-1][1].weight, -(6/fan_in)**0.5, (6/self.embd_dims[level])**0.5)
             if layer < self.top_down_layers-1:
                 if FLAGS.layer_norm != 'none':
                     decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level], affine=True)))
 
                 #decoder_layers.append(('dec_act{}_{}'.format(level,layer), Sine()))
                 decoder_layers.append(('dec_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
-            #elif FLAGS.layer_norm == 'out':
-            #    decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level], affine=True)))
 
             fan_in = self.embd_dims[level]
 
@@ -187,15 +160,15 @@ class GLOM(nn.Module):
 
     def build_input_cnn(self):
         # Input CNN used to initialize the embeddings at each of the levels (see pg 13: 3.5 The Visual Input)
-        cnn_channels = [4,self.min_emb_size//2,self.min_emb_size//2,self.min_emb_size,self.min_emb_size]
+        cnn_channels = [4,self.embd_dims[0]//4,self.embd_dims[0]//2,self.embd_dims[0],self.embd_dims[0]]
         cnn_layers = []
         cnn_layers.append(('cnn_conv_inp', nn.Conv2d(cnn_channels[0],cnn_channels[1],kernel_size=3,stride=1,padding=1)))
         cnn_layers.append(('cnn_norm_inp', nn.InstanceNorm2d(cnn_channels[1], affine=True)))
         cnn_layers.append(('cnn_act_inp', nn.Hardswish(inplace=True)))
         for l in range(1,self.num_input_layers+1):
             cnn_layers.append(('cnn_conv_inp{}'.format(l), nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)))
-            cnn_layers.append(('cnn_norm_inp{}'.format(l), nn.InstanceNorm2d(cnn_channels[l+1], affine=True)))
             if l < self.num_input_layers:
+                cnn_layers.append(('cnn_norm_inp{}'.format(l), nn.InstanceNorm2d(cnn_channels[l+1], affine=True)))
                 cnn_layers.append(('cnn_act_inp{}'.format(l), nn.Hardswish(inplace=True)))
 
         return nn.Sequential(OrderedDict(cnn_layers))
@@ -205,8 +178,8 @@ class GLOM(nn.Module):
         self.upsample_rgb = nn.Sequential(nn.Upsample(
             scale_factor=2, mode='bilinear', align_corners=False), Blur())
 
-        n_feat = 2*self.min_emb_size
-        reconst_in = nn.Conv2d(self.min_emb_size, n_feat, kernel_size=1, stride=1, padding=0)
+        n_feat = 2*self.embd_dims[0]
+        reconst_in = nn.Conv2d(self.embd_dims[0], n_feat, kernel_size=1, stride=1, padding=0)
 
         reconst_layers = nn.ModuleList(
             [nn.Conv2d(n_feat, n_feat // 2, kernel_size=3, stride=1, padding=1)] +
@@ -216,7 +189,7 @@ class GLOM(nn.Module):
         )
 
         reconst_rgb = nn.ModuleList(
-            [nn.Conv2d(self.min_emb_size, 3, kernel_size=3, stride=1, padding=1)] +
+            [nn.Conv2d(self.embd_dims[0], 3, kernel_size=3, stride=1, padding=1)] +
             [nn.Conv2d(max(n_feat // (2 ** (i + 1)),32),
                        3, kernel_size=3, stride=1, padding=1) for i in range(0, 3)]
         )
@@ -288,14 +261,14 @@ class GLOM(nn.Module):
         values = embeddings.reshape(embd_size,h*w)[:,sampled_idxs.reshape(h*w*self.num_samples)].reshape(1,embd_size,h,w,self.num_samples)
         return values
 
-    def attend_to_level(self, embeddings, level, temperature=1.):
+    def attend_to_level(self, embeddings, level, temperature=0.3):
         batch_size,embd_size,h,w = embeddings.shape
 
         # Implementation of the attention mechanism described on pg 13
         values = self.sample_locations(embeddings, level)
         product = values * embeddings.reshape(batch_size,embd_size,h,w,1)
         dot_prod = product.sum(1,keepdim=True)
-        weights = F.softmax(dot_prod/temperature, dim=4)
+        weights = F.softmax(dot_prod/(temperature*embd_size**0.5), dim=4)
         prod = values*weights
         return prod.sum(4)
 
@@ -309,12 +282,10 @@ class GLOM(nn.Module):
             else:
                 preds = self.predictor[level](preds)
 
-        #if FLAGS.l2_normalize:
-        #    preds = F.normalize(preds, dim=1)
-        #    level_embds = F.normalize(level_embds, dim=1)
+        if FLAGS.l2_normalize:
+            preds = F.normalize(preds, dim=1)
+            level_embds = F.normalize(level_embds, dim=1)
 
-        #dot_prod = (preds*level_embds).sum(1)
-        #return dot_prod
         return F.mse_loss(preds,level_embds)
 
     def update_embeddings(self, level_embds, ts, embd_input):
@@ -324,7 +295,7 @@ class GLOM(nn.Module):
         td_loss = []
         for level in range(self.num_levels):
             bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1])) if level > 0 else self.zero_tensor
-            top_down = self.out_norm[level](self.top_down(level_embds[level+1],level)) if level < self.num_levels-1 else self.zero_tensor
+            top_down = self.out_norm[level](self.top_down(level_embds[level+1], level)) if level < self.num_levels-1 else self.zero_tensor
             attention_embd = self.attend_to_level(level_embds[level], level) if level > 0 else self.zero_tensor
             prev_timestep = level_embds[level]
             #if level in [0,1,3]:
@@ -335,8 +306,10 @@ class GLOM(nn.Module):
             if level in [1,2,3]:
                 level_embds[level] = (self.bu_weighting[ts]*bottom_up + self.td_weighting[ts]*top_down + self.td_weighting[ts]*attention_embd + prev_timestep)/4.
             elif level==0:
-                #level_embds[level] = (self.td_weighting[ts]*top_down + self.td_weighting[ts]*attention_embd + prev_timestep + (self.bu_weighting[ts]-1)*embd_input)/3.
-                level_embds[level] = (top_down + 3*prev_timestep)/4.
+                if FLAGS.add_embd_inp:
+                    level_embds[level] = (self.td_weighting[ts]*top_down + prev_timestep + (2.-self.td_weighting[ts])*embd_input)/3.
+                else:
+                    level_embds[level] = (self.td_weighting[ts]*top_down + prev_timestep + (1.-self.td_weighting[ts])*embd_input)/2.
             else:
                 level_embds[level] = ((2.-self.td_weighting[ts])*bottom_up + self.td_weighting[ts]*attention_embd + prev_timestep)/3.
 
@@ -357,7 +330,7 @@ class GLOM(nn.Module):
     def forward(self, img):
         batch_size,chans,height,width = img.shape
         #print(img.shape)
-        embd_input = self.input_cnn(img)
+        embd_input = self.out_norm[0](self.input_cnn(img))
         level_embds = [embd_input.clone()]
         #print(level_embds[-1].norm(dim=1).mean())
         for level in range(1,self.num_levels):

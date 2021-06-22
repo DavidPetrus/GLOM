@@ -11,10 +11,11 @@ FLAGS = flags.FLAGS
 
 class Dataset(torch.utils.data.Dataset):
 
-  def __init__(self, image_files, labels=None):
+  def __init__(self, image_files, granularity, labels=None):
 
         #self.labels = labels
         self.image_files = image_files
+        self.granularity = granularity
 
   def __len__(self):
         return len(self.image_files)
@@ -24,7 +25,7 @@ class Dataset(torch.utils.data.Dataset):
         img_file = self.image_files[index]
 
         img = cv2.imread(img_file)[:,:,::-1]
-        img = resize_image(img)
+        img = resize_image(img, self.granularity[-1])
         img = normalize_image(img)
         img = torch.from_numpy(np.ascontiguousarray(img))
         masked_img, mask = mask_random_crop(img.detach().clone())

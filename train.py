@@ -7,6 +7,8 @@ import datetime
 from glom import GLOM
 from dataloader import Dataset
 
+from sklearn.decomposition import PCA
+
 import wandb
 
 from absl import flags, app
@@ -24,17 +26,20 @@ flags.DEFINE_bool('joint_patch_reconstruction',False,'Whether to reconstruct eac
 # Contrastive learning flags
 flags.DEFINE_bool('add_predictor',False,'Whether to add predictor MLP')
 flags.DEFINE_bool('sep_preds', False, '')
-flags.DEFINE_bool('l2_normalize',True,'L2 normalize embeddings before calculating contrastive loss.')
+flags.DEFINE_bool('l2_normalize',False,'L2 normalize embeddings before calculating contrastive loss.')
 flags.DEFINE_string('layer_norm','out','bu,bu_and_td,out,none')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
-flags.DEFINE_float('reg_coeff',1.,'Regularization coefficient used for regularization loss')
+flags.DEFINE_float('reg_coeff',5.,'Regularization coefficient used for regularization loss')
 
 flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
+flags.DEFINE_string('granularity','8,8,8,16,32','')
 flags.DEFINE_integer('timesteps',10,'Number of timesteps')
-flags.DEFINE_integer('min_emb_size',64,'Embedding size of the lowest level embedding')
-flags.DEFINE_integer('min_patch_size',8,'Patch size of each location at lowest level')
-flags.DEFINE_integer('max_patch_size',32,'Patch size of the upper levels')
+flags.DEFINE_integer('embd_mult',16,'Embedding size relative to patch size')
+flags.DEFINE_bool('affine',False,'')
+#flags.DEFINE_integer('min_patch_size',8,'Patch size of each location at lowest level')
+#flags.DEFINE_integer('max_patch_size',32,'Patch size of the upper levels')
+flags.DEFINE_bool('add_embd_inp',True,'')
 flags.DEFINE_integer('bottom_up_layers',3,'Number of layers for Bottom-Up network')
 flags.DEFINE_integer('top_down_layers',3,'Number of layers for Top-Down network')
 flags.DEFINE_integer('input_cnn_depth',3,'Number of convolutional layers for input CNN')
@@ -51,26 +56,31 @@ def main(argv):
     wandb.save("utils.py")
     wandb.config.update(flags.FLAGS)
 
-    train_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/nature_landscape/*/*.jpg")
+    train_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/work_place/*/*.jpg") + \
+                   glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
     #val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
 
     print("Num train images:",len(train_images))
     #print("Num val images:",len(val_images))
 
+    pca = PCA(n_components=3)
+
     IMAGENET_DEFAULT_MEAN = (255*0.485, 255*0.456, 255*0.406)
     IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
 
-    training_set = Dataset(train_images)
+    granularity = [int(patch_size) for patch_size in FLAGS.granularity.split(',')]
+
+    training_set = Dataset(train_images, granularity)
     training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
     #validation_set = Dataset(val_images)
     #validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True)
 
-    model = GLOM(num_levels=FLAGS.num_levels, min_emb_size=FLAGS.min_emb_size, patch_size=(FLAGS.min_patch_size,FLAGS.max_patch_size), bottom_up_layers=FLAGS.bottom_up_layers, 
+    model = GLOM(num_levels=FLAGS.num_levels, embd_mult=FLAGS.embd_mult, granularity=granularity, bottom_up_layers=FLAGS.bottom_up_layers, 
                 top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
-    model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}.pt'.format(FLAGS.min_emb_size)))
-    model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}.pt'.format(FLAGS.min_emb_size)))
+    #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
+    #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
 
     optimizer = torch.optim.Adam(params=model.parameters(),lr=FLAGS.lr)
 
@@ -132,8 +142,22 @@ def main(argv):
 
             wandb.log(log_dict)
 
-            if train_iter > 10000 and train_iter%100==0:
+            '''if train_iter > 1200 and train_iter%100==0:
+                _,img_height,img_width,_ = target_image.shape
+                for l_ix, embd_tensor in enumerate(level_embds):
+                    embds = embd_tensor.movedim(1,3).detach().cpu().numpy()
+                    _,l_h,l_w,_ = embds.shape
+                    embds = embds.reshape(l_h*l_w,-1)
 
+                    fitted = pca.fit(embds)
+                    print(l_ix, fitted.explained_variance_ratio_)
+                    comps = fitted.transform(embds)
+                    comps = comps-comps.min()
+                    comps = comps/comps.max()
+                    comps = comps.reshape(l_h,l_w,3)
+                    comps = np.repeat(comps, granularity[l_ix], axis=0)
+                    comps = np.repeat(comps, granularity[l_ix], axis=1)
+                    cv2.imshow(str(l_ix),comps)
 
 
                 imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
@@ -148,9 +172,9 @@ def main(argv):
                     cv2.destroyAllWindows()
                     exit()
 
-                #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.min_emb_size))
-                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.min_emb_size))
-                torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
+                #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0]))
+                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0]))
+                torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))'''
 
         
 

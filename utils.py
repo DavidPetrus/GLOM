@@ -10,10 +10,10 @@ IMAGENET_DEFAULT_MEAN = (255*0.485, 255*0.456, 255*0.406)
 IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
 
 
-def resize_image(image):
+def resize_image(image, max_patch_size):
     height, width, _ = image.shape
-    new_height = min(384, height - height%FLAGS.max_patch_size)
-    new_width = min(384, width - width%FLAGS.max_patch_size)
+    new_height = min(512, height - height%max_patch_size)
+    new_width = min(512, width - width%max_patch_size)
     lu = (np.random.randint(0,max(1,image.shape[0]-new_height)), np.random.randint(0,max(1,image.shape[1]-new_width)))
 
     return image[lu[0]:lu[0]+new_height, lu[1]:lu[1]+new_width]
