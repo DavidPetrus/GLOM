@@ -55,8 +55,11 @@ class GLOM(nn.Module):
         self.td_w0 = 30
         self.temperature = FLAGS.temperature
 
-        self.bu_weighting = [2.0,1.8,1.6,1.4,1.2] + [1. for t in range(FLAGS.timesteps-5)]
-        self.td_weighting = [0.5,0.6,0.7,0.8,0.9] + [1. for t in range(FLAGS.timesteps-5)]
+        ts_weights = [0.15,0.3,0.45,0.6,0.75,0.9] + [1. for t in range(FLAGS.timesteps-6)]
+        self.td_w = [ts_w*FLAGS.td_vs_bu for ts_w in ts_weights]
+        self.prev_frac = FLAGS.prev_frac
+        att_weights = [0.25,0.5,1.,2.,4.]
+        self.att_w = [lev_w*FLAGS.att_vs_bu for lev_w in att_weights]
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
@@ -302,14 +305,22 @@ class GLOM(nn.Module):
 
             # The embedding at each timestep is the average of 4 contributions (see pg. 3)
             if level in [1,2,3]:
-                level_embds[level] = (self.bu_weighting[ts]*bottom_up + self.td_weighting[ts]*top_down + self.td_weighting[ts]*attention_embd + prev_timestep)/4.
+                level_embds[level] = (1-self.prev_frac)/(1 + self.td_w[ts] + self.att_w[level])*
+                                    (bottom_up + self.td_w[ts]*top_down + self.att_w[level]*attention_embd) + 
+                                    self.prev_frac*prev_timestep
             elif level==0:
-                if FLAGS.add_embd_inp:
-                    level_embds[level] = (self.td_weighting[ts]*top_down + prev_timestep + (2.-self.td_weighting[ts])*embd_input)/3.
+                if FLAGS.l1_att:
+                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu-self.td_w[ts] + self.td_w[ts] + self.att_w[level])*
+                                    ((FLAGS.td_vs_bu-self.td_w[ts])*embd_input + self.td_w[ts]*top_down + self.att_w[level]*attention_embd) + 
+                                    self.prev_frac*prev_timestep
                 else:
-                    level_embds[level] = (self.td_weighting[ts]*top_down + prev_timestep + (1.-self.td_weighting[ts])*embd_input)/2.
+                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu-self.td_w[ts] + self.td_w[ts])*
+                                    ((FLAGS.td_vs_bu-self.td_w[ts])*embd_input + self.td_w[ts]*top_down) + 
+                                    self.prev_frac*prev_timestep
             else:
-                level_embds[level] = ((2.-self.td_weighting[ts])*bottom_up + self.td_weighting[ts]*attention_embd + prev_timestep)/3.
+                level_embds[level] = (1-self.prev_frac)/(1 + self.att_w[level])*
+                                    (bottom_up + self.att_w[level]*attention_embd) + 
+                                    self.prev_frac*prev_timestep
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
             if ts >= 5:
@@ -352,7 +363,7 @@ class GLOM(nn.Module):
             #print(sum(deltas))
             #if sum(deltas) < self.delta_thresh:
             #    break
-            if t in [0,1,2,5,9,14,19]:
+            if t in [0,1,2,5,9]:
                 delta_log.append((deltas[0],deltas[2],deltas[-1]))
                 norms_log.append((norms[0],norms[2],norms[-1]))
             if t >= 5:

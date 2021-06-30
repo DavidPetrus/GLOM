@@ -40,8 +40,10 @@ flags.DEFINE_integer('timesteps',10,'Number of timesteps')
 flags.DEFINE_integer('embd_mult',16,'Embedding size relative to patch size')
 flags.DEFINE_bool('affine',False,'')
 flags.DEFINE_float('temperature',0.3,'')
-#flags.DEFINE_integer('min_patch_size',8,'Patch size of each location at lowest level')
-#flags.DEFINE_integer('max_patch_size',32,'Patch size of the upper levels')
+flags.DEFINE_float('td_vs_bu',2.,'')
+flags.DEFINE_float('att_vs_bu',1.,'')
+flags.DEFINE_float('prev_frac',0.25,'')
+flags.DEFINE_bool('l1_att',False,'')
 flags.DEFINE_bool('add_embd_inp',False,'')
 flags.DEFINE_integer('bottom_up_layers',3,'Number of layers for Bottom-Up network')
 flags.DEFINE_integer('top_down_layers',3,'Number of layers for Top-Down network')
@@ -66,7 +68,7 @@ def main(argv):
     print("Num train images:",len(train_images))
     #print("Num val images:",len(val_images))
 
-    pca = PCA(n_components=5)
+    pca = PCA(n_components=3)
 
     IMAGENET_DEFAULT_MEAN = (255*0.485, 255*0.456, 255*0.406)
     IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
@@ -82,9 +84,9 @@ def main(argv):
     model = GLOM(num_levels=FLAGS.num_levels, embd_mult=FLAGS.embd_mult, granularity=granularity, bottom_up_layers=FLAGS.bottom_up_layers, 
                 top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
-    model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
-    model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
-    #model.load_state_dict(torch.load('weights/22June2.pt'))
+    #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
+    #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
+    model.load_state_dict(torch.load('weights/22Junie2.pt'))
 
     optimizer = torch.optim.Adam(params=model.parameters(),lr=FLAGS.lr)
 
@@ -161,15 +163,15 @@ def main(argv):
 
             wandb.log(log_dict)
 
-            if train_iter > 1000 and train_iter%100==0:
+            '''if train_iter > 1000 and train_iter%100==0:
                 if final_loss < min_loss:
                     torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
                     min_loss = final_loss
 
                 #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0]))
-                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0]))
+                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0]))'''
 
-            '''_,img_height,img_width,_ = target_image.shape
+            _,img_height,img_width,_ = target_image.shape
             for l_ix, embd_tensor in enumerate(level_embds):
                 embds = embd_tensor.movedim(1,3).detach().cpu().numpy()
                 _,l_h,l_w,_ = embds.shape
@@ -196,7 +198,7 @@ def main(argv):
             key = cv2.waitKey(0)
             if key==27:
                 cv2.destroyAllWindows()
-                exit()'''
+                exit()
 
                 
                 
