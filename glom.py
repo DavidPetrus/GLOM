@@ -68,9 +68,11 @@ class GLOM(nn.Module):
 
         att_stds = [int(1/self.granularity[l]*2**(l+3)) for l in range(1,self.num_levels)]
         self.probs = {}
+        self.unmasked_probs = {}
         for l,patch_size in zip(range(1,self.num_levels), self.granularity[1:]):
             if l > 1 and std == att_stds[l-1]:
                 self.probs[l] = self.probs[l-1]
+                self.unmasked_probs[l] = self.probs[l-1].clone()
                 continue
 
             std = att_stds[l-1]
@@ -84,6 +86,7 @@ class GLOM(nn.Module):
             probs = torch.tensor(np.reshape(probs,(grid_size,grid_size,grid_size,grid_size)),device='cuda')
             probs[probs < 0.] = 0.
             self.probs[l] = probs
+            self.unmasked_probs[l] = probs.clone()
 
         self.build_model()
         self.out_norm = nn.ModuleList([nn.InstanceNorm2d(self.embd_dims[level], affine=FLAGS.affine) for level in range(self.num_levels)])
@@ -261,7 +264,7 @@ class GLOM(nn.Module):
 
         # Randomly sample other locations on the same level to attend to (described on pg 16, final paragraph of 6: Replicating Islands)
         sampled_idxs = torch.multinomial(self.probs[level][:h,:w,:h,:w].reshape(h*w,h*w), self.num_samples)
-        values = embeddings.reshape(embd_size,h*w)[:,sampled_idxs.reshape(h*w*self.num_samples)].reshape(1,embd_size,h,w,self.num_samples)
+        values = embeddings.reshape(embd_size,h*w)[:,sampled_idxs.reshape(h*w*self.num_samples)].reshape(batch_size,embd_size,h,w,self.num_samples)
         return values
 
     def attend_to_level(self, embeddings, level):
@@ -358,9 +361,17 @@ class GLOM(nn.Module):
         return level_embds, level_deltas, level_norms, bu_loss, td_loss
 
     def forward(self, img):
-        batch_size,chans,height,width = img.shape
+        batch_size,chans,h,w = img.shape
         with torch.set_grad_enabled(FLAGS.train_input_cnn):
             embd_input = self.out_norm[0](self.input_cnn(img))
+
+        if not FLAGS.att_to_masks:
+            mask = img[0,3,:,:]
+            for l in list(self.probs.keys()):
+                patch_size = self.granularity[l]
+                lev_h,lev_w = h//patch_size, w//patch_size
+                lev_mask = mask.reshape(lev_h,patch_size,lev_w,patch_size).max(4)[0].max(2)[0].reshape(1,1,lev_h,lev_w)
+                self.probs[l] = self.unmasked_probs[l][:lev_h,:lev_w,:lev_h,:lev_w]*(1-lev_mask)
 
         level_embds = [embd_input.clone()]
         for level in range(1,self.num_levels):
