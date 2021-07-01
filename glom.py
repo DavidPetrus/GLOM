@@ -55,8 +55,7 @@ class GLOM(nn.Module):
         self.td_w0 = 30
         self.temperature = FLAGS.temperature
 
-        ts_weights = [0.15,0.3,0.45,0.6,0.75,0.9] + [1. for t in range(FLAGS.timesteps-6)]
-        self.td_w = [ts_w*FLAGS.td_vs_bu for ts_w in ts_weights]
+        self.td_w  = [0.2,0.4,0.6,0.8] + [1. for t in range(FLAGS.timesteps-4)]
         self.prev_frac = FLAGS.prev_frac
         att_weights = [0.25,0.5,1.,2.,4.]
         self.att_w = [lev_w*FLAGS.att_vs_bu for lev_w in att_weights]
@@ -276,54 +275,75 @@ class GLOM(nn.Module):
         prod = values*weights
         return prod.sum(4)
 
-    def similarity(self, level_embds, preds, level, bu=True):
+    def similarity(self, level_embds, pred_embd, level, bu=True):
         if FLAGS.add_predictor:
             if FLAGS.sep_preds:
                 if bu:
-                    preds = self.predictor_bu[level](preds)
+                    preds = self.predictor_bu[level](pred_embd)
                 else:
-                    preds = self.predictor_td[level](preds)
+                    preds = self.predictor_td[level](pred_embd)
             else:
-                preds = self.predictor[level](preds)
+                preds = self.predictor[level](pred_embd)
 
-        if FLAGS.l2_normalize:
-            preds = F.normalize(preds, dim=1)
-            level_embds = F.normalize(level_embds, dim=1)
+            if FLAGS.symm_pred:
+                if FLAGS.sep_preds:
+                    if bu:
+                        symm_preds = self.predictor_bu[level](level_embds)
+                    else:
+                        symm_preds = self.predictor_td[level](level_embds)
+                else:
+                    symm_preds = self.predictor[level](level_embds)
 
-        return F.mse_loss(preds,level_embds)
+                return 0.5*F.mse_loss(preds,level_embds) + 0.5*F.mse_loss(symm_preds,pred_embd)
+            else:
+                return F.mse_loss(preds,level_embds)
+        else:
+            if FLAGS.l2_normalize:
+                pred_embd = F.normalize(pred_embd, dim=1)
+                level_embds = F.normalize(level_embds, dim=1)
+
+            return F.mse_loss(pred_embd,level_embds)
 
     def update_embeddings(self, level_embds, ts, embd_input):
         level_deltas = []
         level_norms = []
         bu_loss = []
         td_loss = []
-        for level in range(self.num_levels):
-            bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1])) if level > 0 else self.zero_tensor
-            top_down = self.out_norm[level](self.top_down(level_embds[level+1], level)) if level < self.num_levels-1 else self.zero_tensor
-            attention_embd = self.attend_to_level(level_embds[level], level) if level > 0 else self.zero_tensor
+        for level in range(self.num_levels + min(FLAGS.timesteps-ts-self.num_levels,0)):
+            if FLAGS.input_sg:
+                bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1].detach())) if level > 0 else self.zero_tensor
+                top_down = self.out_norm[level](self.top_down(level_embds[level+1].detach(), level)) if level < self.num_levels-1 else self.zero_tensor
+            else:
+                bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1])) if level > 0 else self.zero_tensor
+                top_down = self.out_norm[level](self.top_down(level_embds[level+1], level)) if level < self.num_levels-1 else self.zero_tensor
+
+            if FLAGS.l1_att:
+                attention_embd = self.attend_to_level(level_embds[level], level)
+            else:
+                attention_embd = self.attend_to_level(level_embds[level], level) if level > 0 else self.zero_tensor
             prev_timestep = level_embds[level]
 
             # The embedding at each timestep is the average of 4 contributions (see pg. 3)
             if level in [1,2,3]:
-                level_embds[level] = (1-self.prev_frac)/(1 + self.td_w[ts] + self.att_w[level])*
-                                    (bottom_up + self.td_w[ts]*top_down + self.att_w[level]*attention_embd) + 
+                level_embds[level] = (1-self.prev_frac)/(1 + FLAGS.td_vs_bu*self.td_w[ts] + self.td_w[ts]*self.att_w[level]) * \
+                                    (bottom_up + FLAGS.td_vs_bu*self.td_w[ts]*top_down + self.td_w[ts]*self.att_w[level]*attention_embd) + \
                                     self.prev_frac*prev_timestep
             elif level==0:
                 if FLAGS.l1_att:
-                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu-self.td_w[ts] + self.td_w[ts] + self.att_w[level])*
-                                    ((FLAGS.td_vs_bu-self.td_w[ts])*embd_input + self.td_w[ts]*top_down + self.att_w[level]*attention_embd) + 
+                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu + self.td_w[ts]*self.att_w[level]) * \
+                                    (FLAGS.td_vs_bu*(1-self.td_w[ts])*embd_input + FLAGS.td_vs_bu*self.td_w[ts]*top_down + self.td_w[ts]*self.att_w[level]*attention_embd) + \
                                     self.prev_frac*prev_timestep
                 else:
-                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu-self.td_w[ts] + self.td_w[ts])*
-                                    ((FLAGS.td_vs_bu-self.td_w[ts])*embd_input + self.td_w[ts]*top_down) + 
+                    level_embds[level] = (1-self.prev_frac)/FLAGS.td_vs_bu * \
+                                    (FLAGS.td_vs_bu*(1-self.td_w[ts])*embd_input + FLAGS.td_vs_bu*self.td_w[ts]*top_down) + \
                                     self.prev_frac*prev_timestep
             else:
-                level_embds[level] = (1-self.prev_frac)/(1 + self.att_w[level])*
-                                    (bottom_up + self.att_w[level]*attention_embd) + 
+                level_embds[level] = (1-self.prev_frac)/(1 + self.td_w[ts]*self.att_w[level]) * \
+                                    (bottom_up + self.td_w[ts]*self.att_w[level]*attention_embd) + \
                                     self.prev_frac*prev_timestep
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            if ts >= 5:
+            if ts >= FLAGS.ts_reg:
                 if level > 0:
                     bu_loss.append(self.similarity(level_embds[level].detach(), bottom_up, level, bu=True))
                 if 0 < level < self.num_levels-1:
@@ -339,36 +359,35 @@ class GLOM(nn.Module):
 
     def forward(self, img):
         batch_size,chans,height,width = img.shape
-        #print(img.shape)
         with torch.set_grad_enabled(FLAGS.train_input_cnn):
             embd_input = self.out_norm[0](self.input_cnn(img))
 
         level_embds = [embd_input.clone()]
-        #print(level_embds[-1].norm(dim=1).mean())
         for level in range(1,self.num_levels):
             level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
-            #print(level_embds[-1].norm(dim=1).mean())
 
         total_bu_loss, total_td_loss = 0.,0.
         delta_log = []
         norms_log = []
         bu_log = []
         td_log = []
-        # Keep on updating embeddings until they settle on constant value.
+        # Keep on updating embeddings for t timesteps
         for t in range(FLAGS.timesteps):
             level_embds, deltas, norms, bu_loss, td_loss = self.update_embeddings(level_embds, t, embd_input)
-            if t >= 5:
-                total_bu_loss += sum(bu_loss)/(0.5*FLAGS.timesteps*(self.num_levels-1))
-                total_td_loss += sum(td_loss)/(0.5*FLAGS.timesteps*(self.num_levels-2))
-            #print(sum(deltas))
-            #if sum(deltas) < self.delta_thresh:
-            #    break
-            if t in [0,1,2,5,9]:
-                delta_log.append((deltas[0],deltas[2],deltas[-1]))
-                norms_log.append((norms[0],norms[2],norms[-1]))
-            if t >= 5:
-                bu_log.append((bu_loss[0],bu_loss[2],bu_loss[-1]))
-                td_log.append((td_loss[0],td_loss[2],td_loss[-1]))
+            if t >= FLAGS.ts_reg:
+                total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
+                total_td_loss += sum(td_loss)/max(1.,len(td_loss))
+
+            if t in [0,1,4,7]:
+                delta_log.append((deltas[0],deltas[2],deltas[4]))
+                norms_log.append((norms[1],norms[2],norms[3]))
+            if t in [10,11]:
+                delta_log.append(deltas[0])
+
+            if FLAGS.ts_reg <= t <= 7:
+                bu_log.append((bu_loss[0],bu_loss[2],bu_loss[-1],t))
+                td_log.append((td_loss[0],td_loss[2],td_loss[-1],t))
+
 
         if FLAGS.all_lev_reconst:
             reconst_embd = level_embds[0]

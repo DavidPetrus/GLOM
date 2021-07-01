@@ -24,19 +24,21 @@ flags.DEFINE_float('masked_fraction',0.2,'Fraction of input image that is masked
 flags.DEFINE_bool('all_lev_reconst',False,'')
 
 # Contrastive learning flags
-flags.DEFINE_bool('add_predictor',False,'Whether to add predictor MLP')
+flags.DEFINE_bool('add_predictor',True,'Whether to add predictor MLP')
 flags.DEFINE_bool('sep_preds', False, '')
+flags.DEFINE_bool('symm_pred', True, '')
+flags.DEFINE_bool('input_sg', True, '')
 flags.DEFINE_bool('l2_normalize',False,'L2 normalize embeddings before calculating contrastive loss.')
 flags.DEFINE_string('layer_norm','out','bu,bu_and_td,out,none')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
-flags.DEFINE_float('reg_coeff',10.,'Regularization coefficient used for regularization loss')
+flags.DEFINE_float('reg_coeff',3.,'Regularization coefficient used for regularization loss')
 flags.DEFINE_float('bu_coeff',1.,'Bottom-Up Loss Coefficient')
 flags.DEFINE_bool('train_input_cnn',False,'')
 
 flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
 flags.DEFINE_string('granularity','8,8,8,16,32','')
-flags.DEFINE_integer('timesteps',10,'Number of timesteps')
+flags.DEFINE_integer('timesteps',12,'Number of timesteps')
 flags.DEFINE_integer('embd_mult',16,'Embedding size relative to patch size')
 flags.DEFINE_bool('affine',False,'')
 flags.DEFINE_float('temperature',0.3,'')
@@ -44,6 +46,7 @@ flags.DEFINE_float('td_vs_bu',2.,'')
 flags.DEFINE_float('att_vs_bu',1.,'')
 flags.DEFINE_float('prev_frac',0.25,'')
 flags.DEFINE_bool('l1_att',False,'')
+flags.DEFINE_integer('ts_reg',4,'')
 flags.DEFINE_bool('add_embd_inp',False,'')
 flags.DEFINE_integer('bottom_up_layers',3,'Number of layers for Bottom-Up network')
 flags.DEFINE_integer('top_down_layers',3,'Number of layers for Top-Down network')
@@ -68,7 +71,7 @@ def main(argv):
     print("Num train images:",len(train_images))
     #print("Num val images:",len(val_images))
 
-    pca = PCA(n_components=3)
+    pca = PCA(n_components=20)
 
     IMAGENET_DEFAULT_MEAN = (255*0.485, 255*0.456, 255*0.406)
     IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
@@ -84,9 +87,9 @@ def main(argv):
     model = GLOM(num_levels=FLAGS.num_levels, embd_mult=FLAGS.embd_mult, granularity=granularity, bottom_up_layers=FLAGS.bottom_up_layers, 
                 top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
-    #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
-    #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
-    model.load_state_dict(torch.load('weights/22Junie2.pt'))
+    model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
+    model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
+    #model.load_state_dict(torch.load('weights/22Junie2.pt'))
 
     optimizer = torch.optim.Adam(params=model.parameters(),lr=FLAGS.lr)
 
@@ -135,43 +138,48 @@ def main(argv):
                     embds = embds.reshape(l_h*l_w,-1)
 
                     fitted = pca.fit(embds)
-                    log_dict['var_comp1_l{}'.format(l_ix+1)] = fitted.explained_variance_ratio_[0]
-                    log_dict['var_comp2_l{}'.format(l_ix+1)] = fitted.explained_variance_ratio_[1]
-                    log_dict['var_comp3_l{}'.format(l_ix+1)] = fitted.explained_variance_ratio_[2]
-                    log_dict['var_comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_ratio_[3]
-                    log_dict['var_comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_ratio_[4]
+                    log_dict['var_comp1_l{}'.format(l_ix+1)] = fitted.explained_variance_[0]
+                    log_dict['var_comp2_l{}'.format(l_ix+1)] = fitted.explained_variance_[1]
+                    log_dict['var_comp3_l{}'.format(l_ix+1)] = fitted.explained_variance_[2]
+                    log_dict['var_comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8]
+                    log_dict['var_comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:]
 
-            for ts,ts_delta,ts_norm,ts_bu,ts_td in zip([0,1,2,5,9],delta_log, norms_log, bu_log, td_log ):
-                log_dict['delta_l1_t{}'.format(ts)] = ts_delta[0]
-                log_dict['delta_l3_t{}'.format(ts)] = ts_delta[1]
-                log_dict['delta_l5_t{}'.format(ts)] = ts_delta[2]
-                log_dict['bu_norm_l1_t{}'.format(ts)] = ts_norm[0][0]
-                log_dict['bu_norm_l3_t{}'.format(ts)] = ts_norm[1][0]
-                log_dict['bu_norm_l5_t{}'.format(ts)] = ts_norm[2][0]
-                log_dict['td_norm_l1_t{}'.format(ts)] = ts_norm[0][1]
-                log_dict['td_norm_l3_t{}'.format(ts)] = ts_norm[1][1]
-                log_dict['td_norm_l5_t{}'.format(ts)] = ts_norm[2][1]
-                log_dict['att_norm_l1_t{}'.format(ts)] = ts_norm[0][2]
-                log_dict['att_norm_l3_t{}'.format(ts)] = ts_norm[1][2]
-                log_dict['att_norm_l5_t{}'.format(ts)] = ts_norm[2][2]
-                log_dict['bu_loss_l1_t{}'.format(ts)] = ts_bu[0]
-                log_dict['bu_loss_l3_t{}'.format(ts)] = ts_bu[1]
-                log_dict['bu_loss_l5_t{}'.format(ts)] = ts_bu[2]
-                log_dict['td_loss_l1_t{}'.format(ts)] = ts_td[0]
-                log_dict['td_loss_l3_t{}'.format(ts)] = ts_td[1]
-                log_dict['td_loss_l5_t{}'.format(ts)] = ts_td[2]
+            for ts,ts_delta,ts_norm in zip([0,1,4,7,10,11],delta_log, norms_log):
+                if ts<=7:
+                    log_dict['delta_l1_t{}'.format(ts)] = ts_delta[0]
+                    log_dict['delta_l3_t{}'.format(ts)] = ts_delta[1]
+                    log_dict['delta_l5_t{}'.format(ts)] = ts_delta[2]
+                    log_dict['bu_norm_l2_t{}'.format(ts)] = ts_norm[0][0]
+                    log_dict['bu_norm_l3_t{}'.format(ts)] = ts_norm[1][0]
+                    log_dict['bu_norm_l4_t{}'.format(ts)] = ts_norm[2][0]
+                    log_dict['td_norm_l2_t{}'.format(ts)] = ts_norm[0][1]
+                    log_dict['td_norm_l3_t{}'.format(ts)] = ts_norm[1][1]
+                    log_dict['td_norm_l4_t{}'.format(ts)] = ts_norm[2][1]
+                    log_dict['att_norm_l2_t{}'.format(ts)] = ts_norm[0][2]
+                    log_dict['att_norm_l3_t{}'.format(ts)] = ts_norm[1][2]
+                    log_dict['att_norm_l4_t{}'.format(ts)] = ts_norm[2][2]
+                else:
+                    log_dict['delta_l1_t{}'.format(ts)] = ts_delta
+
+            for ts_bu,ts_td in zip(bu_log, td_log):
+                log_dict['bu_loss_l2_t{}'.format(ts_bu[-1])] = ts_bu[0]
+                log_dict['bu_loss_l3_t{}'.format(ts_bu[-1])] = ts_bu[1]
+                log_dict['bu_loss_l5_t{}'.format(ts_bu[-1])] = ts_bu[2]
+                log_dict['td_loss_l1_t{}'.format(ts_bu[-1])] = ts_td[0]
+                log_dict['td_loss_l3_t{}'.format(ts_bu[-1])] = ts_td[1]
+                log_dict['td_loss_l4_t{}'.format(ts_bu[-1])] = ts_td[2]
 
             wandb.log(log_dict)
 
-            '''if train_iter > 1000 and train_iter%100==0:
+            if train_iter > 1000 and train_iter%100==0:
                 if final_loss < min_loss:
                     torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
                     min_loss = final_loss
 
                 #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0]))
-                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0]))'''
+                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0]))
 
-            _,img_height,img_width,_ = target_image.shape
+            '''_,img_height,img_width,_ = target_image.shape
             for l_ix, embd_tensor in enumerate(level_embds):
                 embds = embd_tensor.movedim(1,3).detach().cpu().numpy()
                 _,l_h,l_w,_ = embds.shape
@@ -198,7 +206,7 @@ def main(argv):
             key = cv2.waitKey(0)
             if key==27:
                 cv2.destroyAllWindows()
-                exit()
+                exit()'''
 
                 
                 
