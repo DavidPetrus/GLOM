@@ -36,7 +36,7 @@ def mask_random_crop(image):
         wh = np.random.randint([FLAGS.min_crop_size, FLAGS.min_crop_size], [FLAGS.max_crop_size, FLAGS.max_crop_size])
         mask[lu[0]:lu[0]+wh[0], lu[1]:lu[1]+wh[1]] = 1.
 
-    image[mask.bool()] = 0.
+    image[mask.bool()] = 0.5
     return image, mask.view(mask.shape[0],mask.shape[1],1)
 
 

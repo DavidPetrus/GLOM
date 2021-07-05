@@ -166,64 +166,75 @@ class GLOM(nn.Module):
 
     def build_input_cnn(self):
         # Input CNN used to initialize the embeddings at each of the levels (see pg 13: 3.5 The Visual Input)
-        cnn_channels = [4,self.embd_dims[0]//4,self.embd_dims[0]//2,self.embd_dims[0],self.embd_dims[0]]
-        cnn_layers = []
-        cnn_layers.append(('cnn_conv_inp', nn.Conv2d(cnn_channels[0],cnn_channels[1],kernel_size=3,stride=1,padding=1)))
-        cnn_layers.append(('cnn_norm_inp', nn.InstanceNorm2d(cnn_channels[1], affine=True)))
-        cnn_layers.append(('cnn_act_inp', nn.Hardswish(inplace=True)))
-        for l in range(1,self.num_input_layers+1):
-            cnn_layers.append(('cnn_conv_inp{}'.format(l), nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)))
-            if l < self.num_input_layers:
-                cnn_layers.append(('cnn_norm_inp{}'.format(l), nn.InstanceNorm2d(cnn_channels[l+1], affine=True)))
-                cnn_layers.append(('cnn_act_inp{}'.format(l), nn.Hardswish(inplace=True)))
+        if FLAGS.linear_input:
+            return nn.Conv2d(4,self.embd_dims[0],kernel_size=self.granularity[0],stride=self.granularity[0])
+        else:
+            cnn_channels = [4,self.embd_dims[0]//4,self.embd_dims[0]//2,self.embd_dims[0],self.embd_dims[0]]
+            cnn_layers = []
+            cnn_layers.append(('cnn_conv_inp', nn.Conv2d(cnn_channels[0],cnn_channels[1],kernel_size=3,stride=1,padding=1)))
+            cnn_layers.append(('cnn_norm_inp', nn.InstanceNorm2d(cnn_channels[1], affine=True)))
+            cnn_layers.append(('cnn_act_inp', nn.Hardswish(inplace=True)))
+            for l in range(1,self.num_input_layers+1):
+                cnn_layers.append(('cnn_conv_inp{}'.format(l), nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=2,padding=1)))
+                if l < self.num_input_layers:
+                    cnn_layers.append(('cnn_norm_inp{}'.format(l), nn.InstanceNorm2d(cnn_channels[l+1], affine=True)))
+                    cnn_layers.append(('cnn_act_inp{}'.format(l), nn.Hardswish(inplace=True)))
 
-        return nn.Sequential(OrderedDict(cnn_layers))
+            return nn.Sequential(OrderedDict(cnn_layers))
 
     def build_reconstruction_net(self):
-        self.upsample_2 = nn.Upsample(scale_factor=2.)
-        self.upsample_rgb = nn.Sequential(nn.Upsample(
-            scale_factor=2, mode='bilinear', align_corners=False), Blur())
+        if FLAGS.linear_reconst:
+            self.reconstruction_net = nn.Conv2d(self.embd_dims[0],3*self.granularity[0]**2,kernel_size=1,stride=1)
+        else:
+            self.upsample_2 = nn.Upsample(scale_factor=2.)
+            self.upsample_rgb = nn.Sequential(nn.Upsample(
+                scale_factor=2, mode='bilinear', align_corners=False), Blur())
 
-        n_feat = 2*self.embd_dims[0]
-        reconst_in = nn.Conv2d(self.embd_dims[0], n_feat, kernel_size=1, stride=1, padding=0)
+            n_feat = 2*self.embd_dims[0]
+            reconst_in = nn.Conv2d(self.embd_dims[0], n_feat, kernel_size=1, stride=1, padding=0)
 
-        reconst_layers = nn.ModuleList(
-            [nn.Conv2d(n_feat, n_feat // 2, kernel_size=3, stride=1, padding=1)] +
-            [nn.Conv2d(n_feat // (2 ** (i + 1)),
-                       max(n_feat // (2 ** (i + 2)),32), kernel_size=3, stride=1, padding=1)
-                for i in range(0, 3 - 1)]
-        )
+            reconst_layers = nn.ModuleList(
+                [nn.Conv2d(n_feat, n_feat // 2, kernel_size=3, stride=1, padding=1)] +
+                [nn.Conv2d(n_feat // (2 ** (i + 1)),
+                           max(n_feat // (2 ** (i + 2)),32), kernel_size=3, stride=1, padding=1)
+                    for i in range(0, 3 - 1)]
+            )
 
-        reconst_rgb = nn.ModuleList(
-            [nn.Conv2d(self.embd_dims[0], 3, kernel_size=3, stride=1, padding=1)] +
-            [nn.Conv2d(max(n_feat // (2 ** (i + 1)),32),
-                       3, kernel_size=3, stride=1, padding=1) for i in range(0, 3)]
-        )
+            reconst_rgb = nn.ModuleList(
+                [nn.Conv2d(self.embd_dims[0], 3, kernel_size=3, stride=1, padding=1)] +
+                [nn.Conv2d(max(n_feat // (2 ** (i + 1)),32),
+                           3, kernel_size=3, stride=1, padding=1) for i in range(0, 3)]
+            )
 
-        reconst_norms = nn.ModuleList([
-            nn.InstanceNorm2d(max(n_feat // (2 ** (i + 1)),32))
-            for i in range(3)
-        ])
-        self.leaky_relu = nn.LeakyReLU(0.2, inplace=True)
+            reconst_norms = nn.ModuleList([
+                nn.InstanceNorm2d(max(n_feat // (2 ** (i + 1)),32))
+                for i in range(3)
+            ])
+            self.leaky_relu = nn.LeakyReLU(0.2, inplace=True)
 
-        self.reconstruction_net = nn.ModuleList([reconst_in, reconst_layers, reconst_rgb, reconst_norms])
+            self.reconstruction_net = nn.ModuleList([reconst_in, reconst_layers, reconst_rgb, reconst_norms])
 
     def reconstruct_image(self, embds):
-        reconst_in, reconst_layers, reconst_rgb, reconst_norms = self.reconstruction_net
-        net = reconst_in(embds)
-        rgb = self.upsample_rgb(reconst_rgb[0](embds))
+        if FLAGS.linear_reconst:
+            pixels = torch.sigmoid(self.reconstruction_net(embds))
+            batch_size,chan_size,map_h,map_w = pixels.shape
+            return pixels.movedim(1,3).reshape(batch_size,map_h,map_w,8,8,3).movedim(2,3).reshape(batch_size,map_h*8,map_w*8,3).movedim(3,1)
+        else:
+            reconst_in, reconst_layers, reconst_rgb, reconst_norms = self.reconstruction_net
+            net = reconst_in(embds)
+            rgb = self.upsample_rgb(reconst_rgb[0](embds))
 
-        for idx, layer in enumerate(reconst_layers):
-            hid = layer(self.upsample_2(net))
-            hid = reconst_norms[idx](hid)
-            net = self.leaky_relu(hid)
+            for idx, layer in enumerate(reconst_layers):
+                hid = layer(self.upsample_2(net))
+                hid = reconst_norms[idx](hid)
+                net = self.leaky_relu(hid)
 
-            rgb = rgb + reconst_rgb[idx + 1](net)
-            if idx < len(reconst_layers) - 1:
-                rgb = self.upsample_rgb(rgb)
+                rgb = rgb + reconst_rgb[idx + 1](net)
+                if idx < len(reconst_layers) - 1:
+                    rgb = self.upsample_rgb(rgb)
 
-        rgb = torch.sigmoid(rgb)
-        return rgb
+            rgb = torch.sigmoid(rgb)
+            return rgb
 
     def generate_positional_encoding(self, height, width):
         # Sinusoidal positional encoding (See 2.3 Neural Fields)
@@ -313,11 +324,13 @@ class GLOM(nn.Module):
         bu_loss = []
         td_loss = []
         for level in range(self.num_levels + min(FLAGS.timesteps-ts-self.num_levels,0)):
-            if FLAGS.input_sg:
+            if FLAGS.sg_bu:
                 bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1].detach())) if level > 0 else self.zero_tensor
-                top_down = self.out_norm[level](self.top_down(level_embds[level+1].detach(), level)) if level < self.num_levels-1 else self.zero_tensor
             else:
                 bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1])) if level > 0 else self.zero_tensor
+            if FLAGS.sg_td:
+                top_down = self.out_norm[level](self.top_down(level_embds[level+1].detach(), level)) if level < self.num_levels-1 else self.zero_tensor
+            else:
                 top_down = self.out_norm[level](self.top_down(level_embds[level+1], level)) if level < self.num_levels-1 else self.zero_tensor
 
             if FLAGS.l1_att:
@@ -334,7 +347,8 @@ class GLOM(nn.Module):
             elif level==0:
                 if FLAGS.l1_att:
                     level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu + self.td_w[ts]*self.att_w[level]) * \
-                                    (FLAGS.td_vs_bu*(1-self.td_w[ts])*embd_input + FLAGS.td_vs_bu*self.td_w[ts]*top_down + self.td_w[ts]*self.att_w[level]*attention_embd) + \
+                                    (FLAGS.td_vs_bu*(1-self.td_w[ts])*embd_input + FLAGS.td_vs_bu*self.td_w[ts]*top_down + \
+                                    self.td_w[ts]*self.att_w[level]*attention_embd) + \
                                     self.prev_frac*prev_timestep
                 else:
                     level_embds[level] = (1-self.prev_frac)/FLAGS.td_vs_bu * \
@@ -365,17 +379,17 @@ class GLOM(nn.Module):
         with torch.set_grad_enabled(FLAGS.train_input_cnn):
             embd_input = self.out_norm[0](self.input_cnn(img))
 
+        level_embds = [embd_input.clone()]
+        for level in range(1,self.num_levels):
+            level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
+
         if not FLAGS.att_to_masks:
             mask = img[0,3,:,:]
             for l in list(self.probs.keys()):
                 patch_size = self.granularity[l]
                 lev_h,lev_w = h//patch_size, w//patch_size
-                lev_mask = mask.reshape(lev_h,patch_size,lev_w,patch_size).max(4)[0].max(2)[0].reshape(1,1,lev_h,lev_w)
+                lev_mask = mask.reshape(lev_h,patch_size,lev_w,patch_size).max(3)[0].max(1)[0].reshape(1,1,lev_h,lev_w)
                 self.probs[l] = self.unmasked_probs[l][:lev_h,:lev_w,:lev_h,:lev_w]*(1-lev_mask)
-
-        level_embds = [embd_input.clone()]
-        for level in range(1,self.num_levels):
-            level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
 
         total_bu_loss, total_td_loss = 0.,0.
         delta_log = []

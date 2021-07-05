@@ -26,18 +26,23 @@ flags.DEFINE_bool('all_lev_reconst',False,'')
 # Contrastive learning flags
 flags.DEFINE_bool('add_predictor',True,'Whether to add predictor MLP')
 flags.DEFINE_bool('sep_preds', False, '')
-flags.DEFINE_bool('symm_pred', True, '')
-flags.DEFINE_bool('input_sg', True, '')
+flags.DEFINE_bool('symm_pred', False, '')
+flags.DEFINE_bool('sg_td',False,'')
+flags.DEFINE_bool('sg_bu', True, '')
 flags.DEFINE_bool('l2_normalize',False,'L2 normalize embeddings before calculating contrastive loss.')
 flags.DEFINE_string('layer_norm','out','bu,bu_and_td,out,none')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
+flags.DEFINE_float('mask_coeff',1.,'')
 flags.DEFINE_float('reg_coeff',3.,'Regularization coefficient used for regularization loss')
 flags.DEFINE_float('bu_coeff',1.,'Bottom-Up Loss Coefficient')
-flags.DEFINE_bool('train_input_cnn',False,'')
+flags.DEFINE_bool('linear_input',True,'')
+flags.DEFINE_bool('linear_reconst',True,'')
+flags.DEFINE_bool('train_input_cnn',True,'')
 
 flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
 flags.DEFINE_string('granularity','8,8,8,16,32','')
+flags.DEFINE_bool('att_to_masks',True,'')
 flags.DEFINE_integer('timesteps',12,'Number of timesteps')
 flags.DEFINE_integer('embd_mult',16,'Embedding size relative to patch size')
 flags.DEFINE_bool('affine',False,'')
@@ -87,13 +92,13 @@ def main(argv):
     model = GLOM(num_levels=FLAGS.num_levels, embd_mult=FLAGS.embd_mult, granularity=granularity, bottom_up_layers=FLAGS.bottom_up_layers, 
                 top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
-    model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
-    model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0])))
-    #model.load_state_dict(torch.load('weights/22Junie2.pt'))
+    model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
+    model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
+    #model.load_state_dict(torch.load('weights/1July2.pt'))
 
     optimizer = torch.optim.Adam(params=model.parameters(),lr=FLAGS.lr)
 
-    loss_func = torch.nn.MSELoss(reduction='sum')
+    loss_func = torch.nn.MSELoss(reduction='none')
 
     model.to('cuda')
     model.train()
@@ -114,8 +119,11 @@ def main(argv):
             target_image = target_load.to('cuda')
 
             reconstructed_image, bottom_up_loss, top_down_loss, delta_log, norms_log, bu_log, td_log, level_embds = model(masked_image)
-            reconstruction_loss = 0.001*loss_func(target_image,reconstructed_image)
-            final_loss = reconstruction_loss + FLAGS.reg_coeff*(FLAGS.bu_coeff*bottom_up_loss+top_down_loss)
+            all_reconst_loss = 100.*loss_func(target_image,reconstructed_image)
+            mask = masked_image[:,3:,:,:]
+            masked_loss = (all_reconst_loss*mask).mean()
+            unmasked_loss = (all_reconst_loss*(1-mask)).mean()
+            final_loss = FLAGS.mask_coeff*masked_loss + unmasked_loss + FLAGS.reg_coeff*(FLAGS.bu_coeff*bottom_up_loss+top_down_loss)
 
             # Calculate gradients of the weights
             final_loss.backward()
@@ -124,14 +132,12 @@ def main(argv):
             optimizer.step()
 
             train_iter += 1
-            log_dict = {"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss":reconstruction_loss, 
+            log_dict = {"Train Iteration":train_iter, "Final Loss": final_loss, "Masked Loss":masked_loss, "Reconstruction Loss": unmasked_loss,
                         "Bottom-Up Loss": bottom_up_loss, "Top-Down Loss":top_down_loss}
 
             if train_iter % 100 == 0:
                 print(log_dict)
-                #print(total_loss/100)
-                #total_loss = 0.
-
+                
                 for l_ix, embd_tensor in enumerate(level_embds):
                     embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
                     _,l_h,l_w,_ = embds.shape
@@ -141,8 +147,21 @@ def main(argv):
                     log_dict['var_comp1_l{}'.format(l_ix+1)] = fitted.explained_variance_[0]
                     log_dict['var_comp2_l{}'.format(l_ix+1)] = fitted.explained_variance_[1]
                     log_dict['var_comp3_l{}'.format(l_ix+1)] = fitted.explained_variance_[2]
-                    log_dict['var_comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8]
-                    log_dict['var_comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:]
+                    log_dict['var_comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8].sum()
+                    log_dict['var_comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
+
+
+                '''imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * 255.
+                imshow = np.clip(imshow,0,255)
+                imshow = imshow.astype(np.uint8)
+                targ = target_image[0].detach().movedim(0,2).cpu().numpy() * 255.
+                targ = targ.astype(np.uint8)
+                cv2.imshow('pred',imshow)
+                cv2.imshow('target',targ)
+                key = cv2.waitKey(0)
+                if key==27:
+                    cv2.destroyAllWindows()
+                    exit()'''
 
             for ts,ts_delta,ts_norm in zip([0,1,4,7,10,11],delta_log, norms_log):
                 if ts<=7:
@@ -165,7 +184,7 @@ def main(argv):
                 log_dict['bu_loss_l2_t{}'.format(ts_bu[-1])] = ts_bu[0]
                 log_dict['bu_loss_l3_t{}'.format(ts_bu[-1])] = ts_bu[1]
                 log_dict['bu_loss_l5_t{}'.format(ts_bu[-1])] = ts_bu[2]
-                log_dict['td_loss_l1_t{}'.format(ts_bu[-1])] = ts_td[0]
+                log_dict['td_loss_l2_t{}'.format(ts_bu[-1])] = ts_td[0]
                 log_dict['td_loss_l3_t{}'.format(ts_bu[-1])] = ts_td[1]
                 log_dict['td_loss_l4_t{}'.format(ts_bu[-1])] = ts_td[2]
 
@@ -176,8 +195,8 @@ def main(argv):
                     torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
                     min_loss = final_loss
 
-                #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}.pt'.format(FLAGS.embd_mult*granularity[0]))
-                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}.pt'.format(FLAGS.embd_mult*granularity[0]))
+                #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0]))
+                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0]))
 
             '''_,img_height,img_width,_ = target_image.shape
             for l_ix, embd_tensor in enumerate(level_embds):
