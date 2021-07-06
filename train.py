@@ -4,6 +4,8 @@ import torch
 import glob
 import datetime
 
+from nfnets.agc import AGC
+
 from glom import GLOM
 from dataloader import Dataset
 
@@ -17,28 +19,31 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('exp','test','')
 flags.DEFINE_integer('batch_size',1,'')
+flags.DEFINE_bool('use_agc',False,'')
+flags.DEFINE_float('clip_grad',15.,'')
 flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('min_crop_size',24,'Minimum size of cropped region')
 flags.DEFINE_integer('max_crop_size',64,'Maximum size of cropped region')
 flags.DEFINE_float('masked_fraction',0.2,'Fraction of input image that is masked')
 flags.DEFINE_bool('all_lev_reconst',False,'')
+flags.DEFINE_bool('only_reconst',False,'')
 
 # Contrastive learning flags
 flags.DEFINE_bool('add_predictor',True,'Whether to add predictor MLP')
 flags.DEFINE_bool('sep_preds', False, '')
 flags.DEFINE_bool('symm_pred', False, '')
 flags.DEFINE_bool('sg_td',False,'')
-flags.DEFINE_bool('sg_bu', True, '')
+flags.DEFINE_bool('sg_bu', False, '')
 flags.DEFINE_bool('l2_normalize',False,'L2 normalize embeddings before calculating contrastive loss.')
 flags.DEFINE_string('layer_norm','out','bu,bu_and_td,out,none')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
-flags.DEFINE_float('mask_coeff',1.,'')
-flags.DEFINE_float('reg_coeff',3.,'Regularization coefficient used for regularization loss')
+flags.DEFINE_float('mask_coeff',3.,'')
+flags.DEFINE_float('reg_coeff',1.,'Regularization coefficient used for regularization loss')
 flags.DEFINE_float('bu_coeff',1.,'Bottom-Up Loss Coefficient')
 flags.DEFINE_bool('linear_input',True,'')
 flags.DEFINE_bool('linear_reconst',True,'')
-flags.DEFINE_bool('train_input_cnn',True,'')
+flags.DEFINE_bool('train_input_cnn',False,'')
 
 flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
 flags.DEFINE_string('granularity','8,8,8,16,32','')
@@ -94,9 +99,16 @@ def main(argv):
 
     model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
-    #model.load_state_dict(torch.load('weights/1July2.pt'))
+    #model.load_state_dict(torch.load('weights/5July1.pt'))
 
-    optimizer = torch.optim.Adam(params=model.parameters(),lr=FLAGS.lr)
+    if FLAGS.use_agc:
+        optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
+        optimizer = AGC(model.parameters(), optimizer, clipping=0.08)
+    else:
+        optimizer = torch.optim.AdamW(params=model.parameters(), lr=FLAGS.lr)
+
+    for par in model.reconstruction_net.parameters():
+        par.requires_grad = False
 
     loss_func = torch.nn.MSELoss(reduction='none')
 
@@ -128,12 +140,16 @@ def main(argv):
             # Calculate gradients of the weights
             final_loss.backward()
 
-            # Update the weights
-            optimizer.step()
-
             train_iter += 1
             log_dict = {"Train Iteration":train_iter, "Final Loss": final_loss, "Masked Loss":masked_loss, "Reconstruction Loss": unmasked_loss,
                         "Bottom-Up Loss": bottom_up_loss, "Top-Down Loss":top_down_loss}
+
+            # Update the weights
+            if FLAGS.clip_grad > 0. and not FLAGS.use_agc:
+                log_dict['bu_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.bottom_up_net.parameters(), FLAGS.clip_grad)
+                log_dict['td_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.top_down_net.parameters(), FLAGS.clip_grad)
+
+            optimizer.step()
 
             if train_iter % 100 == 0:
                 print(log_dict)

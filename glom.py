@@ -325,9 +325,9 @@ class GLOM(nn.Module):
         td_loss = []
         for level in range(self.num_levels + min(FLAGS.timesteps-ts-self.num_levels,0)):
             if FLAGS.sg_bu:
-                bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1].detach())) if level > 0 else self.zero_tensor
+                bottom_up = self.out_norm[level](self.bottom_up_net[level-1](prev_timestep.detach())) if level > 0 else self.zero_tensor
             else:
-                bottom_up = self.out_norm[level](self.bottom_up_net[level-1](level_embds[level-1])) if level > 0 else self.zero_tensor
+                bottom_up = self.out_norm[level](self.bottom_up_net[level-1](prev_timestep)) if level > 0 else self.zero_tensor
             if FLAGS.sg_td:
                 top_down = self.out_norm[level](self.top_down(level_embds[level+1].detach(), level)) if level < self.num_levels-1 else self.zero_tensor
             else:
@@ -380,53 +380,56 @@ class GLOM(nn.Module):
             embd_input = self.out_norm[0](self.input_cnn(img))
 
         level_embds = [embd_input.clone()]
-        for level in range(1,self.num_levels):
-            level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
-
-        if not FLAGS.att_to_masks:
-            mask = img[0,3,:,:]
-            for l in list(self.probs.keys()):
-                patch_size = self.granularity[l]
-                lev_h,lev_w = h//patch_size, w//patch_size
-                lev_mask = mask.reshape(lev_h,patch_size,lev_w,patch_size).max(3)[0].max(1)[0].reshape(1,1,lev_h,lev_w)
-                self.probs[l] = self.unmasked_probs[l][:lev_h,:lev_w,:lev_h,:lev_w]*(1-lev_mask)
-
-        total_bu_loss, total_td_loss = 0.,0.
-        delta_log = []
-        norms_log = []
-        bu_log = []
-        td_log = []
-        # Keep on updating embeddings for t timesteps
-        for t in range(FLAGS.timesteps):
-            level_embds, deltas, norms, bu_loss, td_loss = self.update_embeddings(level_embds, t, embd_input)
-            if t >= FLAGS.ts_reg:
-                total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
-                total_td_loss += sum(td_loss)/max(1.,len(td_loss))
-
-            if t in [0,1,4,7]:
-                delta_log.append((deltas[0],deltas[2],deltas[4]))
-                norms_log.append((norms[1],norms[2],norms[3]))
-            if t in [10,11]:
-                delta_log.append(deltas[0])
-
-            if FLAGS.ts_reg <= t <= 7:
-                bu_log.append((bu_loss[0],bu_loss[2],bu_loss[-1],t))
-                td_log.append((td_loss[0],td_loss[2],td_loss[-1],t))
-
-
-        if FLAGS.all_lev_reconst:
-            reconst_embd = level_embds[0]
+        if not FLAGS.only_reconst:
             for level in range(1,self.num_levels):
-                inp_embd = level_embds[level]
-                for td_lev in range(level,0,-1):
-                    inp_embd = self.out_norm[td_lev-1](self.top_down(inp_embd, td_lev-1))
-                reconst_embd = reconst_embd + inp_embd
-            reconst_embd = reconst_embd/self.num_levels
-            reconst_img = self.reconstruct_image(reconst_embd)
+                level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
+
+            if not FLAGS.att_to_masks:
+                mask = img[0,3,:,:]
+                for l in list(self.probs.keys()):
+                    patch_size = self.granularity[l]
+                    lev_h,lev_w = h//patch_size, w//patch_size
+                    lev_mask = mask.reshape(lev_h,patch_size,lev_w,patch_size).max(3)[0].max(1)[0].reshape(1,1,lev_h,lev_w)
+                    self.probs[l] = self.unmasked_probs[l][:lev_h,:lev_w,:lev_h,:lev_w]*(1-lev_mask)
+
+            total_bu_loss, total_td_loss = 0.,0.
+            delta_log = []
+            norms_log = []
+            bu_log = []
+            td_log = []
+            # Keep on updating embeddings for t timesteps
+            for t in range(FLAGS.timesteps):
+                level_embds, deltas, norms, bu_loss, td_loss = self.update_embeddings(level_embds, t, embd_input)
+                if t >= FLAGS.ts_reg:
+                    total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
+                    total_td_loss += sum(td_loss)/max(1.,len(td_loss))
+
+                if t in [0,1,4,7]:
+                    delta_log.append((deltas[0],deltas[2],deltas[4]))
+                    norms_log.append((norms[1],norms[2],norms[3]))
+                if t in [10,11]:
+                    delta_log.append(deltas[0])
+
+                if FLAGS.ts_reg <= t <= 7:
+                    bu_log.append((bu_loss[0],bu_loss[2],bu_loss[-1],t))
+                    td_log.append((td_loss[0],td_loss[2],td_loss[-1],t))
+
+
+            if FLAGS.all_lev_reconst:
+                reconst_embd = level_embds[0]
+                for level in range(1,self.num_levels):
+                    inp_embd = level_embds[level]
+                    for td_lev in range(level,0,-1):
+                        inp_embd = self.out_norm[td_lev-1](self.top_down(inp_embd, td_lev-1))
+                    reconst_embd = reconst_embd + inp_embd
+                reconst_embd = reconst_embd/self.num_levels
+                reconst_img = self.reconstruct_image(reconst_embd)
+            else:
+                reconst_img = self.reconstruct_image(level_embds[0])
+
+            return reconst_img, total_bu_loss, total_td_loss, delta_log, norms_log, bu_log, td_log, level_embds
         else:
             reconst_img = self.reconstruct_image(level_embds[0])
-
-        return reconst_img, total_bu_loss, total_td_loss, delta_log, norms_log, bu_log, td_log, level_embds
-        #return reconst_img, 0., 0., [], [], [], [], 0.
+            return reconst_img, 0., 0., [], [], [], [], level_embds
 
 
