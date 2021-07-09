@@ -38,7 +38,8 @@ flags.DEFINE_bool('sep_preds', False, '')
 flags.DEFINE_bool('symm_pred', False, '')
 flags.DEFINE_bool('sg_td',False,'')
 flags.DEFINE_bool('sg_bu', False, '')
-flags.DEFINE_bool('l2_normalize',True,'L2 normalize embeddings before calculating contrastive loss.')
+flags.DEFINE_bool('l2_normalize',True,'')
+flags.DEFINE_bool('l2_no_norm',False,'')
 flags.DEFINE_string('layer_norm','out','bu,bu_and_td,out,none')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
@@ -204,10 +205,12 @@ def main(argv):
             for ts_bu,ts_td in zip(bu_log, td_log):
                 log_dict['bu_loss_l2_t{}'.format(ts_bu[-1])] = ts_bu[0]
                 log_dict['bu_loss_l3_t{}'.format(ts_bu[-1])] = ts_bu[1]
-                log_dict['bu_loss_l5_t{}'.format(ts_bu[-1])] = ts_bu[2]
-                log_dict['td_loss_l2_t{}'.format(ts_bu[-1])] = ts_td[0]
-                log_dict['td_loss_l3_t{}'.format(ts_bu[-1])] = ts_td[1]
-                log_dict['td_loss_l4_t{}'.format(ts_bu[-1])] = ts_td[2]
+                log_dict['bu_loss_l4_t{}'.format(ts_bu[-1])] = ts_bu[2]
+                log_dict['bu_loss_l5_t{}'.format(ts_bu[-1])] = ts_bu[3]
+                log_dict['td_loss_l1_t{}'.format(ts_bu[-1])] = ts_td[0]
+                log_dict['td_loss_l2_t{}'.format(ts_bu[-1])] = ts_td[1]
+                log_dict['td_loss_l3_t{}'.format(ts_bu[-1])] = ts_td[2]
+                log_dict['td_loss_l4_t{}'.format(ts_bu[-1])] = ts_td[3]
 
             wandb.log(log_dict)
 

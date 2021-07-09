@@ -343,13 +343,17 @@ class GLOM(nn.Module):
         td_loss = []
         for level in range(self.num_levels + min(FLAGS.timesteps-ts-self.num_levels,0)):
             if FLAGS.sg_bu:
-                bottom_up = self.out_norm[level](self.bottom_up_net[level-1](prev_timestep.detach())) if level > 0 else self.zero_tensor
+                bottom_no_norm = self.bottom_up_net[level-1](prev_timestep.detach()) if level > 0 else self.zero_tensor
+                bottom_up = self.out_norm[level](bottom_no_norm) if level > 0 else self.zero_tensor
             else:
-                bottom_up = self.out_norm[level](self.bottom_up_net[level-1](prev_timestep)) if level > 0 else self.zero_tensor
+                bottom_no_norm = self.bottom_up_net[level-1](prev_timestep) if level > 0 else self.zero_tensor
+                bottom_up = self.out_norm[level](bottom_no_norm) if level > 0 else self.zero_tensor
             if FLAGS.sg_td:
-                top_down = self.out_norm[level](self.top_down(level_embds[level+1].detach(), level)) if level < self.num_levels-1 else self.zero_tensor
+                top_no_norm = self.top_down(level_embds[level+1].detach(), level) if level < self.num_levels-1 else self.zero_tensor
+                top_down = self.out_norm[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
             else:
-                top_down = self.out_norm[level](self.top_down(level_embds[level+1], level)) if level < self.num_levels-1 else self.zero_tensor
+                top_no_norm = self.top_down(level_embds[level+1], level) if level < self.num_levels-1 else self.zero_tensor
+                top_down = self.out_norm[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
 
             if FLAGS.l1_att:
                 attention_embd = self.attend_to_level(level_embds[level], level)
@@ -364,13 +368,13 @@ class GLOM(nn.Module):
                                     self.prev_frac*prev_timestep
             elif level==0:
                 if FLAGS.l1_att:
-                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu + self.td_w[ts]*self.att_w[level]) * \
-                                    (FLAGS.td_vs_bu*(1-self.td_w[ts])*embd_input + FLAGS.td_vs_bu*self.td_w[ts]*top_down + \
+                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu*self.td_w[ts] + self.td_w[ts]*self.att_w[level]) * \
+                                    (FLAGS.td_vs_bu*self.td_w[ts]*top_down + \
                                     self.td_w[ts]*self.att_w[level]*attention_embd) + \
                                     self.prev_frac*prev_timestep
                 else:
-                    level_embds[level] = (1-self.prev_frac)/FLAGS.td_vs_bu * \
-                                    (FLAGS.td_vs_bu*(1-self.td_w[ts])*embd_input + FLAGS.td_vs_bu*self.td_w[ts]*top_down) + \
+                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu*self.td_w[ts]) * \
+                                    (FLAGS.td_vs_bu*self.td_w[ts]*top_down) + \
                                     self.prev_frac*prev_timestep
             else:
                 level_embds[level] = (1-self.prev_frac)/(1 + self.td_w[ts]*self.att_w[level]) * \
@@ -379,8 +383,12 @@ class GLOM(nn.Module):
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
             if self.bank_full and ts >= FLAGS.ts_reg:
-                self.all_bu[level].append(bottom_up)
-                self.all_td[level].append(top_down)
+                if FLAGS.l2_no_norm:
+                    self.all_bu[level].append(bottom_no_norm)
+                    self.all_td[level].append(top_no_norm)
+                else:
+                    self.all_bu[level].append(bottom_up)
+                    self.all_td[level].append(top_down)
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
@@ -445,12 +453,12 @@ class GLOM(nn.Module):
                         if FLAGS.sg_target:
                             if level > 0:
                                 bu_loss.append(self.similarity(level_embds[level].detach(), self.all_bu[level][t-FLAGS.ts_reg], level, bu=True))
-                            if 0 < level < self.num_levels-1:
+                            if level < self.num_levels-1:
                                 td_loss.append(self.similarity(level_embds[level].detach(), self.all_td[level][t-FLAGS.ts_reg], level, bu=False))
                         else:
                             if level > 0:
                                 bu_loss.append(self.similarity(level_embds[level], self.all_bu[level][t-FLAGS.ts_reg], level, bu=True))
-                            if 0 < level < self.num_levels-1:
+                            if level < self.num_levels-1:
                                 td_loss.append(self.similarity(level_embds[level], self.all_td[level][t-FLAGS.ts_reg], level, bu=False))
 
                     if t >= FLAGS.ts_reg:
@@ -458,8 +466,8 @@ class GLOM(nn.Module):
                         total_td_loss += sum(td_loss)/max(1.,len(td_loss))
 
                     if self.bank_full and FLAGS.ts_reg <= t <= 7:
-                        bu_log.append((bu_loss[0],bu_loss[1],bu_loss[-1],t))
-                        td_log.append((td_loss[1],td_loss[2],td_loss[-1],t))
+                        bu_log.append((bu_loss[0],bu_loss[1],bu_loss[2],bu_loss[3],t))
+                        td_log.append((td_loss[0],td_loss[1],td_loss[2],td_loss[3],t))
 
             
             if not self.bank_full and len(self.temp_neg[0]) >= FLAGS.num_neg_imgs*FLAGS.num_neg_ts:
