@@ -96,7 +96,11 @@ class GLOM(nn.Module):
             self.unmasked_probs[l] = probs.clone()
 
         self.build_model()
-        self.out_norm = nn.ModuleList([nn.InstanceNorm2d(self.embd_dims[level], affine=FLAGS.affine) for level in range(self.num_levels)])
+        if FLAGS.layer_norm == 'out':
+            self.out_norm = nn.ModuleList([nn.InstanceNorm2d(self.embd_dims[level], affine=False) for level in range(self.num_levels)])
+        elif FLAGS.layer_norm == 'separate':
+            self.out_norm_bu = nn.ModuleList([nn.InstanceNorm2d(self.embd_dims[level], affine=True) for level in range(self.num_levels)])
+            self.out_norm_td = nn.ModuleList([nn.InstanceNorm2d(self.embd_dims[level], affine=True) for level in range(self.num_levels)])
 
 
     def build_model(self):
@@ -130,15 +134,13 @@ class GLOM(nn.Module):
         encoder_layers.append(('enc_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],
                                 kernel_size=self.strides[level],stride=self.strides[level])))
 
-        if FLAGS.layer_norm != 'none':
-            encoder_layers.append(('enc_norm{}_0'.format(level), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
+        encoder_layers.append(('enc_norm{}_0'.format(level), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
 
         encoder_layers.append(('enc_act{}_0'.format(level), nn.Hardswish(inplace=True)))
         for layer in range(1,self.bottom_up_layers):
             encoder_layers.append(('enc_lev{}_{}'.format(level,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
             if layer < self.bottom_up_layers-1:
-                if FLAGS.layer_norm != 'none':
-                    encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
+                encoder_layers.append(('enc_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
                 encoder_layers.append(('enc_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
 
         return nn.Sequential(OrderedDict(encoder_layers))
@@ -151,8 +153,7 @@ class GLOM(nn.Module):
         fan_in = self.embd_dims[level+1] + 4*self.num_pos_freqs
         decoder_layers.append(('dec_lev{}_0'.format(level), nn.Conv2d(fan_in,self.embd_dims[level+1],kernel_size=1,stride=1)))
         #nn.init.uniform_(decoder_layers[-1][1].weight, -self.td_w0*(6/fan_in)**0.5, self.td_w0*(6/fan_in)**0.5)
-        if FLAGS.layer_norm != 'none':
-            decoder_layers.append(('dec_norm{}_0'.format(level), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
+        decoder_layers.append(('dec_norm{}_0'.format(level), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
 
         #decoder_layers.append(('dec_act{}_0'.format(level), Sine()))
         decoder_layers.append(('dec_act{}_0'.format(level), nn.Hardswish(inplace=True)))
@@ -161,8 +162,7 @@ class GLOM(nn.Module):
             decoder_layers.append(('dec_lev{}_{}'.format(level,layer), nn.Conv2d(fan_in,self.embd_dims[level],kernel_size=1,stride=1)))
             #nn.init.uniform_(decoder_layers[-1][1].weight, -(6/fan_in)**0.5, (6/self.embd_dims[level])**0.5)
             if layer < self.top_down_layers-1:
-                if FLAGS.layer_norm != 'none':
-                    decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level], affine=True)))
+                decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level], affine=True)))
 
                 #decoder_layers.append(('dec_act{}_{}'.format(level,layer), Sine()))
                 decoder_layers.append(('dec_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
@@ -347,13 +347,23 @@ class GLOM(nn.Module):
                 bottom_up = self.out_norm[level](bottom_no_norm) if level > 0 else self.zero_tensor
             else:
                 bottom_no_norm = self.bottom_up_net[level-1](prev_timestep) if level > 0 else self.zero_tensor
-                bottom_up = self.out_norm[level](bottom_no_norm) if level > 0 else self.zero_tensor
+                if FLAGS.layer_norm == 'out':
+                    bottom_up = self.out_norm[level](bottom_no_norm) if level > 0 else self.zero_tensor
+                elif FLAGS.layer_norm == 'separate':
+                    bottom_up = self.out_norm_bu[level](bottom_no_norm) if level > 0 else self.zero_tensor
+                else:
+                    bottom_up = bottom_no_norm
             if FLAGS.sg_td:
                 top_no_norm = self.top_down(level_embds[level+1].detach(), level) if level < self.num_levels-1 else self.zero_tensor
                 top_down = self.out_norm[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
             else:
                 top_no_norm = self.top_down(level_embds[level+1], level) if level < self.num_levels-1 else self.zero_tensor
-                top_down = self.out_norm[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
+                if FLAGS.layer_norm == 'out':
+                    top_down = self.out_norm[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
+                elif FLAGS.layer_norm == 'separate':
+                    top_down = self.out_norm_td[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
+                else:
+                    top_down = top_no_norm
 
             if FLAGS.l1_att:
                 attention_embd = self.attend_to_level(level_embds[level], level)
@@ -411,12 +421,22 @@ class GLOM(nn.Module):
         self.all_bu = {0: [], 1: [], 2: [], 3: [], 4: []}
         self.all_td = {0: [], 1: [], 2: [], 3: [], 4: []}
         with torch.set_grad_enabled(FLAGS.train_input_cnn):
-            embd_input = self.out_norm[0](self.input_cnn(img))
+            if FLAGS.layer_norm == 'out':
+                embd_input = self.out_norm[0](self.input_cnn(img))
+            elif FLAGS.layer_norm == 'separate':
+                embd_input = self.out_norm_bu[0](self.input_cnn(img))
+            else:
+                embd_input = self.input_cnn(img)
 
         level_embds = [embd_input.clone()]
         if not FLAGS.only_reconst:
             for level in range(1,self.num_levels):
-                level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
+                if FLAGS.layer_norm == 'out':
+                    level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
+                elif FLAGS.layer_norm == 'separate':
+                    level_embds.append(self.out_norm_bu[level](self.bottom_up_net[level-1](level_embds[-1])))
+                else:
+                    level_embds.append(self.bottom_up_net[level-1](level_embds[-1]))
 
             if not FLAGS.att_to_masks:
                 mask = img[0,3,:,:]
