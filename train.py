@@ -105,7 +105,7 @@ def main(argv):
 
     model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
-    #model.load_state_dict(torch.load('weights/8Julie2.pt'))
+    #model.load_state_dict(torch.load('weights/9July6.pt'))
 
     if FLAGS.use_agc:
         optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
@@ -236,7 +236,7 @@ def main(argv):
                 comps = comps.reshape(l_h,l_w,20)[:,:,:3]
                 comps = np.repeat(comps, granularity[l_ix], axis=0)
                 comps = np.repeat(comps, granularity[l_ix], axis=1)
-                cv2.imshow(str(l_ix)+1,comps)
+                cv2.imshow(str(l_ix+1),comps)
 
 
             imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
