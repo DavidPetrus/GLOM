@@ -24,26 +24,31 @@ flags.DEFINE_float('clip_grad',20.,'')
 flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('min_crop_size',24,'Minimum size of cropped region')
 flags.DEFINE_integer('max_crop_size',64,'Maximum size of cropped region')
-flags.DEFINE_float('masked_fraction',0.2,'Fraction of input image that is masked')
-flags.DEFINE_bool('all_lev_reconst',False,'')
+flags.DEFINE_float('masked_fraction',0.,'Fraction of input image that is masked')
 flags.DEFINE_bool('only_reconst',False,'')
 
 # Contrastive learning flags
 flags.DEFINE_integer('num_neg_imgs',100,'')
 flags.DEFINE_integer('neg_per_ts',10,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
+flags.DEFINE_bool('sim_target_att',False,'')
 flags.DEFINE_bool('sg_target',True,'')
-flags.DEFINE_bool('add_predictor',False,'Whether to add predictor MLP')
-flags.DEFINE_bool('sep_preds', False, '')
-flags.DEFINE_bool('symm_pred', False, '')
-flags.DEFINE_bool('sg_td',False,'')
-flags.DEFINE_bool('sg_bu', False, '')
-flags.DEFINE_bool('l2_normalize',True,'')
 flags.DEFINE_bool('l2_no_norm',False,'')
-flags.DEFINE_string('layer_norm','out','out,separate,none')
+flags.DEFINE_string('layer_norm','none','out,separate,none')
+
+# Forward Prediction flags
+flags.DEFINE_bool('spatial_att',True,'')
+
+# Timestep update flags
+flags.DEFINE_integer('timesteps',6,'Number of timesteps')
+
+# Attention flags
+flags.DEFINE_float('temperature',0.3,'')
+flags.DEFINE_float('sim_temp',0.03,'')
+flags.DEFINE_float('weighting_temp',1.,'')
+flags.DEFINE_bool('l1_att',False,'')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
-flags.DEFINE_float('mask_coeff',1.,'')
 flags.DEFINE_float('reg_coeff',0.01,'Regularization coefficient used for regularization loss')
 flags.DEFINE_float('bu_coeff',1.,'Bottom-Up Loss Coefficient')
 flags.DEFINE_bool('linear_input',True,'')
@@ -52,18 +57,8 @@ flags.DEFINE_bool('train_input_cnn',False,'')
 
 flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
 flags.DEFINE_string('granularity','8,8,8,16,32','')
-flags.DEFINE_bool('att_to_masks',True,'')
-flags.DEFINE_integer('timesteps',12,'Number of timesteps')
 flags.DEFINE_integer('embd_mult',16,'Embedding size relative to patch size')
-flags.DEFINE_bool('affine',False,'')
-flags.DEFINE_float('temperature',0.3,'')
-flags.DEFINE_float('sim_temp',0.03,'')
-flags.DEFINE_float('td_vs_bu',2.,'')
-flags.DEFINE_float('att_vs_bu',1.,'')
-flags.DEFINE_float('prev_frac',0.25,'')
-flags.DEFINE_bool('l1_att',False,'')
-flags.DEFINE_integer('ts_reg',1,'')
-flags.DEFINE_bool('add_embd_inp',False,'')
+
 flags.DEFINE_integer('bottom_up_layers',3,'Number of layers for Bottom-Up network')
 flags.DEFINE_integer('top_down_layers',3,'Number of layers for Top-Down network')
 flags.DEFINE_integer('input_cnn_depth',3,'Number of convolutional layers for input CNN')
@@ -116,7 +111,7 @@ def main(argv):
     for par in model.reconstruction_net.parameters():
         par.requires_grad = False
 
-    loss_func = torch.nn.MSELoss(reduction='none')
+    loss_func = torch.nn.MSELoss(reduction='mean')
 
     model.to('cuda')
     model.train()
@@ -136,18 +131,15 @@ def main(argv):
             masked_image = masked_load.to('cuda')
             target_image = target_load.to('cuda')
 
-            reconstructed_image, bottom_up_loss, top_down_loss, delta_log, norms_log, bu_log, td_log, level_embds = model(masked_image)
-            all_reconst_loss = 100.*loss_func(target_image,reconstructed_image)
-            mask = masked_image[:,3:,:,:]
-            masked_loss = (all_reconst_loss*mask).mean()
-            unmasked_loss = (all_reconst_loss*(1-mask)).mean()
-            final_loss = FLAGS.mask_coeff*masked_loss + unmasked_loss + FLAGS.reg_coeff*(FLAGS.bu_coeff*bottom_up_loss+top_down_loss)
+            reconstructed_image, bottom_up_loss, top_down_loss, delta_log, norms_log, bu_log, td_log, sims_log, level_embds = model(masked_image)
+            reconstruction_loss = 100.*loss_func(target_image,reconstructed_image)
+            final_loss = reconstruction_loss + FLAGS.reg_coeff*(FLAGS.bu_coeff*bottom_up_loss+top_down_loss)
 
             # Calculate gradients of the weights
             final_loss.backward()
 
             train_iter += 1
-            log_dict = {"Train Iteration":train_iter, "Final Loss": final_loss, "Masked Loss":masked_loss, "Reconstruction Loss": unmasked_loss,
+            log_dict = {"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss": reconstruction_loss,
                         "Bottom-Up Loss": bottom_up_loss, "Top-Down Loss":top_down_loss}
 
             # Update the weights
@@ -172,35 +164,27 @@ def main(argv):
                     log_dict['var_comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8].sum()
                     log_dict['var_comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
 
+            for ts,ts_sims in enumerate(sims_log):
+                for level,lev_sims in enumerate(ts_sims):
+                    if level < FLAGS.num_levels-1:
+                        log_dict['td_sim_l{}_t{}'.format(level,ts)] = lev_sims[1]
+                        log_dict['prev_sim_l{}_t{}'.format(level,ts)] = lev_sims[2]
+                    else:
+                        log_dict['prev_sim_l{}_t{}'.format(level,ts)] = lev_sims[1]
 
-                '''imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * 255.
-                imshow = np.clip(imshow,0,255)
-                imshow = imshow.astype(np.uint8)
-                targ = target_image[0].detach().movedim(0,2).cpu().numpy() * 255.
-                targ = targ.astype(np.uint8)
-                cv2.imshow('pred',imshow)
-                cv2.imshow('target',targ)
-                key = cv2.waitKey(0)
-                if key==27:
-                    cv2.destroyAllWindows()
-                    exit()'''
-
-            for ts,ts_delta,ts_norm in zip([0,1,4,7,10,11],delta_log, norms_log):
-                if ts<=7:
-                    log_dict['delta_l1_t{}'.format(ts)] = ts_delta[0]
-                    log_dict['delta_l3_t{}'.format(ts)] = ts_delta[1]
-                    log_dict['delta_l5_t{}'.format(ts)] = ts_delta[2]
-                    log_dict['bu_norm_l2_t{}'.format(ts)] = ts_norm[0][0]
-                    log_dict['bu_norm_l3_t{}'.format(ts)] = ts_norm[1][0]
-                    log_dict['bu_norm_l4_t{}'.format(ts)] = ts_norm[2][0]
-                    log_dict['td_norm_l2_t{}'.format(ts)] = ts_norm[0][1]
-                    log_dict['td_norm_l3_t{}'.format(ts)] = ts_norm[1][1]
-                    log_dict['td_norm_l4_t{}'.format(ts)] = ts_norm[2][1]
-                    log_dict['att_norm_l2_t{}'.format(ts)] = ts_norm[0][2]
-                    log_dict['att_norm_l3_t{}'.format(ts)] = ts_norm[1][2]
-                    log_dict['att_norm_l4_t{}'.format(ts)] = ts_norm[2][2]
-                else:
-                    log_dict['delta_l1_t{}'.format(ts)] = ts_delta
+            for ts,ts_delta,ts_norm in zip([0,1,2,3,4,5],delta_log, norms_log):
+                log_dict['delta_l1_t{}'.format(ts)] = ts_delta[0]
+                log_dict['delta_l3_t{}'.format(ts)] = ts_delta[1]
+                log_dict['delta_l5_t{}'.format(ts)] = ts_delta[2]
+                log_dict['bu_norm_l2_t{}'.format(ts)] = ts_norm[0][0]
+                log_dict['bu_norm_l3_t{}'.format(ts)] = ts_norm[1][0]
+                log_dict['bu_norm_l4_t{}'.format(ts)] = ts_norm[2][0]
+                log_dict['td_norm_l2_t{}'.format(ts)] = ts_norm[0][1]
+                log_dict['td_norm_l3_t{}'.format(ts)] = ts_norm[1][1]
+                log_dict['td_norm_l4_t{}'.format(ts)] = ts_norm[2][1]
+                log_dict['att_norm_l2_t{}'.format(ts)] = ts_norm[0][2]
+                log_dict['att_norm_l3_t{}'.format(ts)] = ts_norm[1][2]
+                log_dict['att_norm_l4_t{}'.format(ts)] = ts_norm[2][2]
 
             for ts_bu,ts_td in zip(bu_log, td_log):
                 log_dict['bu_loss_l2_t{}'.format(ts_bu[-1])] = ts_bu[0]

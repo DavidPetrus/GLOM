@@ -61,25 +61,26 @@ class GLOM(nn.Module):
         self.td_w0 = 30
         self.temperature = FLAGS.temperature
 
-        self.td_w  = [0.2,0.4,0.6,0.8] + [1. for t in range(FLAGS.timesteps-4)]
-        self.prev_frac = FLAGS.prev_frac
-        att_weights = [0.25,0.5,1.,2.,4.]
-        self.att_w = [lev_w*FLAGS.att_vs_bu for lev_w in att_weights]
+        if FLAGS.l1_att:
+            self.att_w = [0.25,0.5,1.,2.,4.]
+        else:
+            self.att_w = [0.,0.5,1.,2.,4.]
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
         self.num_samples = 20
 
         self.zero_tensor = torch.zeros([1,1], device='cuda')
+        self.bu_sim = torch.ones([1,1,64,64], device='cuda')
         self.sim_target = torch.zeros(4096,dtype=torch.long,device='cuda')
 
         att_stds = [int(1/self.granularity[l]*2**(l+3)) for l in range(1,self.num_levels)]
         self.probs = {}
-        self.unmasked_probs = {}
-        for l,patch_size in zip(range(1,self.num_levels), self.granularity[1:]):
+        for l,patch_size in zip(range(self.num_levels), self.granularity):
+            if self.att_w[l] == 0.: continue
+
             if l > 1 and std == att_stds[l-1]:
                 self.probs[l] = self.probs[l-1]
-                self.unmasked_probs[l] = self.probs[l-1].clone()
                 continue
 
             std = att_stds[l-1]
@@ -93,7 +94,6 @@ class GLOM(nn.Module):
             probs = torch.tensor(np.reshape(probs,(grid_size,grid_size,grid_size,grid_size)),device='cuda')
             probs[probs < 0.] = 0.
             self.probs[l] = probs
-            self.unmasked_probs[l] = probs.clone()
 
         self.build_model()
         if FLAGS.layer_norm == 'out':
@@ -108,24 +108,9 @@ class GLOM(nn.Module):
         self.bottom_up_net = nn.ModuleList([self.encoder(l) for l in range(self.num_levels-1)])
         # Initialize seperate Top-Down net for each level
         self.top_down_net = nn.ModuleList([self.decoder(l) for l in range(self.num_levels-1)])
-        if FLAGS.add_predictor:
-            if FLAGS.sep_preds:
-                self.predictor_bu = nn.ModuleList([self.pred_net(l) for l in range(self.num_levels)])
-                self.predictor_td = nn.ModuleList([self.pred_net(l) for l in range(self.num_levels)])
-            else:
-                self.predictor = nn.ModuleList([self.pred_net(l) for l in range(self.num_levels)])
 
         self.input_cnn = self.build_input_cnn()
         self.build_reconstruction_net()
-
-    def pred_net(self, level):
-        pred_layers = []
-        pred_layers.append(('pred_lev{}_0'.format(level), nn.Conv2d(self.embd_dims[level],self.embd_dims[level]//2,kernel_size=1,stride=1)))
-        pred_layers.append(('pred_norm{}_0'.format(level), nn.InstanceNorm2d(self.embd_dims[level]//2, affine=True)))
-        pred_layers.append(('pred_act{}_0'.format(level), nn.Hardswish(inplace=True)))
-        pred_layers.append(('pred_lev{}_1'.format(level), nn.Conv2d(self.embd_dims[level]//2,self.embd_dims[level],kernel_size=1,stride=1)))
-
-        return nn.Sequential(OrderedDict(pred_layers))
 
     def encoder(self, level):
         # A separate encoder (bottom-up net) is used for each level and shared among locations within each level (hence the use of 1x1 convolutions 
@@ -243,6 +228,19 @@ class GLOM(nn.Module):
             rgb = torch.sigmoid(rgb)
             return rgb
 
+    def layer_normalize(self, level_embds, level, bu=True):
+        if FLAGS.layer_norm == 'out':
+            level_embds = self.out_norm[level](level_embds)
+        elif FLAGS.layer_norm == 'separate':
+            if bu:
+                level_embds = self.out_norm_bu[level](level_embds)
+            else:
+                level_embds = self.out_norm_td[level](level_embds)
+        else:
+            level_embds = level_embds
+
+        return level_embds
+
     def generate_positional_encoding(self, height, width):
         # Sinusoidal positional encoding (See 2.3 Neural Fields)
         step = 2./height
@@ -296,103 +294,71 @@ class GLOM(nn.Module):
         prod = values*weights
         return prod.sum(4)
 
+    def add_spatial_attention(self, pred_embds, level, ret_att=False):
+        if level == 0 and not FLAGS.l1_att:
+            attention_embd = self.zero_tensor
+        else:
+            attention_embd = self.attend_to_level(pred_embds, level)
+
+        level_embd = (pred_embds + self.att_w[level]*attention_embd)/(1+self.att_w[level])
+        if ret_att:
+            return level_embd, attention_embd
+        else:
+            return level_embd
+
     def similarity(self, level_embds, pred_embd, level, bu=True):
         bs,c,h,w = level_embds.shape
-        if FLAGS.add_predictor:
-            if FLAGS.sep_preds:
-                if bu:
-                    preds = self.predictor_bu[level](pred_embd)
-                else:
-                    preds = self.predictor_td[level](pred_embd)
-            else:
-                preds = self.predictor[level](pred_embd)
 
-            if FLAGS.symm_pred:
-                if FLAGS.sep_preds:
-                    if bu:
-                        symm_preds = self.predictor_bu[level](level_embds)
-                    else:
-                        symm_preds = self.predictor_td[level](level_embds)
-                else:
-                    symm_preds = self.predictor[level](level_embds)
+        pred_embd = F.normalize(pred_embd, dim=1)
+        level_embds = F.normalize(level_embds, dim=1)
 
-                return 0.5*F.mse_loss(preds,level_embds) + 0.5*F.mse_loss(symm_preds,pred_embd)
-            else:
-                return F.mse_loss(preds,level_embds)
-        else:
-            if FLAGS.l2_normalize:
-                pred_embd = F.normalize(pred_embd, dim=1)
-                level_embds = F.normalize(level_embds, dim=1)
+        pred_embd = pred_embd.permute(2,3,0,1)
+        pos_sims = torch.matmul(pred_embd,level_embds.permute(2,3,1,0)).reshape(h*w,1)
+        neg_sims = torch.matmul(pred_embd,self.neg_embds[level]).reshape(h*w,-1)
+        all_sims = torch.cat([pos_sims,neg_sims],dim=1)
 
-            pred_embd = pred_embd.permute(2,3,0,1)
-            pos_sims = torch.matmul(pred_embd,level_embds.permute(2,3,1,0)).reshape(h*w,1)
-            neg_sims = torch.matmul(pred_embd,self.neg_embds[level]).reshape(h*w,-1)
-            all_sims = torch.cat([pos_sims,neg_sims],dim=1)
+        return F.cross_entropy(all_sims/FLAGS.sim_temp,self.sim_target[:all_sims.shape[0]])
 
-            if FLAGS.l2_normalize:
-                return F.cross_entropy(all_sims/FLAGS.sim_temp,self.sim_target[:all_sims.shape[0]])
-            else:
-                return F.cross_entropy(all_sims/(FLAGS.sim_temp*c**0.5),self.sim_target[:all_sims.shape[0]])
+    def bu_sim_calc(self, bottom_up, embd):
+        bottom_up = F.normalize(bottom_up, dim=1)
+        embd = F.normalize(embd, dim=1)
+        sim = (bottom_up*embd).sum(dim=1,keepdim=True)
 
-            #return F.mse_loss(pred_embd,level_embds)
+        return sim
 
     def update_embeddings(self, level_embds, ts, embd_input, store_embds=False):
         level_deltas = []
         level_norms = []
-        bu_loss = []
-        td_loss = []
-        for level in range(self.num_levels + min(FLAGS.timesteps-ts-self.num_levels,0)):
-            if FLAGS.sg_bu:
-                bottom_no_norm = self.bottom_up_net[level-1](prev_timestep.detach()) if level > 0 else self.zero_tensor
-                bottom_up = self.out_norm[level](bottom_no_norm) if level > 0 else self.zero_tensor
-            else:
-                bottom_no_norm = self.bottom_up_net[level-1](prev_timestep) if level > 0 else self.zero_tensor
-                if FLAGS.layer_norm == 'out':
-                    bottom_up = self.out_norm[level](bottom_no_norm) if level > 0 else self.zero_tensor
-                elif FLAGS.layer_norm == 'separate':
-                    bottom_up = self.out_norm_bu[level](bottom_no_norm) if level > 0 else self.zero_tensor
-                else:
-                    bottom_up = bottom_no_norm
-            if FLAGS.sg_td:
-                top_no_norm = self.top_down(level_embds[level+1].detach(), level) if level < self.num_levels-1 else self.zero_tensor
-                top_down = self.out_norm[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
-            else:
-                top_no_norm = self.top_down(level_embds[level+1], level) if level < self.num_levels-1 else self.zero_tensor
-                if FLAGS.layer_norm == 'out':
-                    top_down = self.out_norm[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
-                elif FLAGS.layer_norm == 'separate':
-                    top_down = self.out_norm_td[level](top_no_norm) if level < self.num_levels-1 else self.zero_tensor
-                else:
-                    top_down = top_no_norm
+        level_sims = []
+        pred_embds = []
+        for level in range(self.num_levels):
+            bs,c,h,w = level_embds[level].shape
 
-            if FLAGS.l1_att:
-                attention_embd = self.attend_to_level(level_embds[level], level)
-            else:
-                attention_embd = self.attend_to_level(level_embds[level], level) if level > 0 else self.zero_tensor
+            bottom_no_norm = self.bottom_up_net[level-1](level_embds[level-1]) if level > 0 else embd_input
+            bottom_up = self.layer_normalize(bottom_no_norm,level,bu=True)
+
+            top_no_norm = self.top_down(level_embds[level+1], level) if level < self.num_levels-1 else self.zero_tensor
+            top_down = self.layer_normalize(top_no_norm,level,bu=False) if level < self.num_levels-1 else self.zero_tensor
+
             prev_timestep = level_embds[level]
 
-            # The embedding at each timestep is the average of 4 contributions (see pg. 3)
-            if level in [1,2,3]:
-                level_embds[level] = (1-self.prev_frac)/(1 + FLAGS.td_vs_bu*self.td_w[ts] + self.td_w[ts]*self.att_w[level]) * \
-                                    (bottom_up + FLAGS.td_vs_bu*self.td_w[ts]*top_down + self.td_w[ts]*self.att_w[level]*attention_embd) + \
-                                    self.prev_frac*prev_timestep
-            elif level==0:
-                if FLAGS.l1_att:
-                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu*self.td_w[ts] + self.td_w[ts]*self.att_w[level]) * \
-                                    (FLAGS.td_vs_bu*self.td_w[ts]*top_down + \
-                                    self.td_w[ts]*self.att_w[level]*attention_embd) + \
-                                    self.prev_frac*prev_timestep
-                else:
-                    level_embds[level] = (1-self.prev_frac)/(FLAGS.td_vs_bu*self.td_w[ts]) * \
-                                    (FLAGS.td_vs_bu*self.td_w[ts]*top_down) + \
-                                    self.prev_frac*prev_timestep
+            bu_prev_sim = self.bu_sim_calc(bottom_up, prev_timestep)
+            if level < self.num_levels - 1:
+                bu_td_sim = self.bu_sim_calc(bottom_up, top_down)
+                contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_td_sim,bu_prev_sim],dim=1)
+                contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
+                pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:])
             else:
-                level_embds[level] = (1-self.prev_frac)/(1 + self.td_w[ts]*self.att_w[level]) * \
-                                    (bottom_up + self.td_w[ts]*self.att_w[level]*attention_embd) + \
-                                    self.prev_frac*prev_timestep
+                contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_prev_sim],dim=1)
+                contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
+                pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + prev_timestep*contrib_weights[:,1:2,:,:])
+
+            level_sims.append(contrib_sims.mean((0,2,3)))
+
+            level_embds[level], attention_embd = self.add_spatial_attention(pred_embds[level], level, ret_att=True)
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            if self.bank_full and ts >= FLAGS.ts_reg:
+            if self.bank_full:
                 if FLAGS.l2_no_norm:
                     self.all_bu[level].append(bottom_no_norm)
                     self.all_td[level].append(top_no_norm)
@@ -406,104 +372,88 @@ class GLOM(nn.Module):
                 level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
                 level_norms.append((torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean(),torch.norm(attention_embd,dim=1).mean()))
 
-                if level == self.num_levels + FLAGS.timesteps-ts-self.num_levels-1:
-                    bs,c,h,w = level_embds[level].shape
-                    neg_sample = level_embds[level][0,:,torch.randint(0,h,(FLAGS.neg_per_ts,)),torch.randint(0,w,(FLAGS.neg_per_ts,))].detach()
-                    if FLAGS.l2_normalize:
+                if ts == FLAGS.timesteps-1:
+                    if FLAGS.sim_target_att:
+                        neg_sample = level_embds[level][0,:,torch.randint(0,h,(FLAGS.neg_per_ts,)),torch.randint(0,w,(FLAGS.neg_per_ts,))].detach()
                         self.temp_neg[level].append(F.normalize(neg_sample, dim=0))
                     else:
-                        self.temp_neg[level].append(neg_sample)
+                        neg_sample = pred_embds[level][0,:,torch.randint(0,h,(FLAGS.neg_per_ts,)),torch.randint(0,w,(FLAGS.neg_per_ts,))].detach()
+                        self.temp_neg[level].append(F.normalize(neg_sample, dim=0))
 
-        return level_embds, level_deltas, level_norms, bu_loss, td_loss
+        return level_embds, pred_embds, level_deltas, level_norms, level_sims
 
     def forward(self, img):
         batch_size,chans,h,w = img.shape
         self.all_bu = {0: [], 1: [], 2: [], 3: [], 4: []}
         self.all_td = {0: [], 1: [], 2: [], 3: [], 4: []}
+        level_embds = []
         with torch.set_grad_enabled(FLAGS.train_input_cnn):
-            if FLAGS.layer_norm == 'out':
-                embd_input = self.out_norm[0](self.input_cnn(img))
-            elif FLAGS.layer_norm == 'separate':
-                embd_input = self.out_norm_bu[0](self.input_cnn(img))
-            else:
-                embd_input = self.input_cnn(img)
+            embd_input = self.input_cnn(img)
+            level_embds.append(self.layer_normalize(embd_input.clone(),0,bu=True))
 
-        level_embds = [embd_input.clone()]
-        if not FLAGS.only_reconst:
-            for level in range(1,self.num_levels):
-                if FLAGS.layer_norm == 'out':
-                    level_embds.append(self.out_norm[level](self.bottom_up_net[level-1](level_embds[-1])))
-                elif FLAGS.layer_norm == 'separate':
-                    level_embds.append(self.out_norm_bu[level](self.bottom_up_net[level-1](level_embds[-1])))
-                else:
-                    level_embds.append(self.bottom_up_net[level-1](level_embds[-1]))
-
-            if not FLAGS.att_to_masks:
-                mask = img[0,3,:,:]
-                for l in list(self.probs.keys()):
-                    patch_size = self.granularity[l]
-                    lev_h,lev_w = h//patch_size, w//patch_size
-                    lev_mask = mask.reshape(lev_h,patch_size,lev_w,patch_size).max(3)[0].max(1)[0].reshape(1,1,lev_h,lev_w)
-                    self.probs[l] = self.unmasked_probs[l][:lev_h,:lev_w,:lev_h,:lev_w]*(1-lev_mask)
-
-            total_bu_loss, total_td_loss = 0.,0.
-            delta_log = []
-            norms_log = []
-            bu_log = []
-            td_log = []
-            neg_ts = np.random.choice(FLAGS.timesteps-FLAGS.ts_reg,FLAGS.num_neg_ts) + FLAGS.ts_reg
-
-            # Keep on updating embeddings for t timesteps
-            for t in range(FLAGS.timesteps):
-                store_embds = True if t in neg_ts else False
-                level_embds, deltas, norms, bu_loss, td_loss = self.update_embeddings(level_embds, t, embd_input, store_embds=store_embds)
-
-                if t in [0,1,4,7]:
-                    delta_log.append((deltas[0],deltas[2],deltas[4]))
-                    norms_log.append((norms[1],norms[2],norms[3]))
-                if t in [10,11]:
-                    delta_log.append(deltas[0])
-
-            # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            for t in range(FLAGS.timesteps):
-                if self.bank_full and t >= FLAGS.ts_reg:
-                    bu_loss = []
-                    td_loss = []
-                    for level in range(self.num_levels + min(FLAGS.timesteps-t-self.num_levels,0)):
-                        if FLAGS.sg_target:
-                            if level > 0:
-                                bu_loss.append(self.similarity(level_embds[level].detach(), self.all_bu[level][t-FLAGS.ts_reg], level, bu=True))
-                            if level < self.num_levels-1:
-                                td_loss.append(self.similarity(level_embds[level].detach(), self.all_td[level][t-FLAGS.ts_reg], level, bu=False))
-                        else:
-                            if level > 0:
-                                bu_loss.append(self.similarity(level_embds[level], self.all_bu[level][t-FLAGS.ts_reg], level, bu=True))
-                            if level < self.num_levels-1:
-                                td_loss.append(self.similarity(level_embds[level], self.all_td[level][t-FLAGS.ts_reg], level, bu=False))
-
-                    if t >= FLAGS.ts_reg:
-                        total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
-                        total_td_loss += sum(td_loss)/max(1.,len(td_loss))
-
-                    if self.bank_full and FLAGS.ts_reg <= t <= 7:
-                        bu_log.append((bu_loss[0],bu_loss[1],bu_loss[2],bu_loss[3],t))
-                        td_log.append((td_loss[0],td_loss[1],td_loss[2],td_loss[3],t))
-
-            
-            if not self.bank_full and len(self.temp_neg[0]) >= FLAGS.num_neg_imgs*FLAGS.num_neg_ts:
-                self.bank_full = True
-
-            if self.bank_full:
-                for level in range(self.num_levels):
-                    self.neg_embds[level] = torch.cat(self.temp_neg[level], dim=1)
-                    del self.temp_neg[level][:int(len(self.temp_neg[level])/FLAGS.num_neg_imgs)]
-                
-
-            reconst_img = self.reconstruct_image(level_embds[0])
-
-            return reconst_img, total_bu_loss, total_td_loss, delta_log, norms_log, bu_log, td_log, level_embds
-        else:
+        if FLAGS.only_reconst:
             reconst_img = self.reconstruct_image(level_embds[0])
             return reconst_img, 0., 0., [], [], [], [], level_embds
+
+        for level in range(1,self.num_levels):
+            pred_embd = self.layer_normalize(self.bottom_up_net[level-1](level_embds[-1]),level,bu=True)
+            if FLAGS.spatial_att:
+                level_embds.append(self.add_spatial_attention(pred_embd,level))
+            else:
+                level_embds.append(pred_embd)
+
+        total_bu_loss, total_td_loss = 0.,0.
+        delta_log = []
+        norms_log = []
+        bu_log = []
+        td_log = []
+        sims_log = []
+        neg_ts = np.random.choice(FLAGS.timesteps,FLAGS.num_neg_ts)
+
+        # Keep on updating embeddings for t timesteps
+        for t in range(FLAGS.timesteps):
+            store_embds = True if t in neg_ts else False
+            level_embds, pred_embds, deltas, norms, sims = self.update_embeddings(level_embds, t, embd_input, store_embds=store_embds)
+
+            sims_log.append(sims)
+            delta_log.append((deltas[0],deltas[2],deltas[4]))
+            norms_log.append((norms[1],norms[2],norms[3]))
+
+        # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
+        for t in range(FLAGS.timesteps):
+            if self.bank_full:
+                bu_loss = []
+                td_loss = []
+                for level in range(self.num_levels):
+                    if FLAGS.sim_target_att:
+                        sim_target = level_embds[level].detach() if FLAGS.sg_target else level_embds[level]
+                    else:
+                        sim_target = pred_embds[level].detach() if FLAGS.sg_target else pred_embds[level]
+
+                    if level > 0:
+                        bu_loss.append(self.similarity(sim_target, self.all_bu[level][t], level, bu=True))
+                    if level < self.num_levels-1:
+                        td_loss.append(self.similarity(sim_target, self.all_td[level][t], level, bu=False))
+
+                total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
+                total_td_loss += sum(td_loss)/max(1.,len(td_loss))
+
+                if self.bank_full:
+                    bu_log.append((bu_loss[0],bu_loss[1],bu_loss[2],bu_loss[3],t))
+                    td_log.append((td_loss[0],td_loss[1],td_loss[2],td_loss[3],t))
+
+        
+        if not self.bank_full and len(self.temp_neg[0]) >= FLAGS.num_neg_imgs*FLAGS.num_neg_ts:
+            self.bank_full = True
+
+        if self.bank_full:
+            for level in range(self.num_levels):
+                self.neg_embds[level] = torch.cat(self.temp_neg[level], dim=1)
+                del self.temp_neg[level][:int(len(self.temp_neg[level])/FLAGS.num_neg_imgs)]
+
+        reconst_img = self.reconstruct_image(level_embds[0])
+
+        return reconst_img, total_bu_loss, total_td_loss, delta_log, norms_log, bu_log, td_log, sims_log, level_embds
+            
 
 
