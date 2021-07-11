@@ -323,9 +323,9 @@ class GLOM(nn.Module):
 
     def bu_sim_calc(self, bottom_up, embd):
         if FLAGS.sm_sim:
-            bottom_up_dist = F.softmax(bottom_up,dim=1)
-            embd_dist = F.softmax(embd,dim=1)
-            sim = (bottom_up_dist*embd_dist).sum(dim=1,keepdim=True) / (bottom_up_dist*bottom_up_dist).sum(dim=1,keepdim=True)
+            bottom_up_dist = F.normalize(F.softmax(bottom_up,dim=1),dim=1)
+            embd_dist = (F.softmax(embd,dim=1),dim=1)
+            sim = (bottom_up_dist*embd_dist).sum(dim=1,keepdim=True)
         else:
             bottom_up = F.normalize(bottom_up, dim=1)
             embd = F.normalize(embd, dim=1)
@@ -354,17 +354,21 @@ class GLOM(nn.Module):
                 bu_td_sim = self.bu_sim_calc(bottom_up, top_down)
                 contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_td_sim,bu_prev_sim],dim=1)
                 if FLAGS.sm_sim:
-                    contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
-                else:
                     contrib_weights = contrib_sims
-                pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:])
+                    pred_embds.append((bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:]) / \
+                                        (contrib_weights.sum(dim=1,keepdim=True)))
+                else:
+                    contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
+                    pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:])
             else:
                 contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_prev_sim],dim=1)
                 if FLAGS.sm_sim:
-                    contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
-                else:
                     contrib_weights = contrib_sims
-                pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + prev_timestep*contrib_weights[:,1:2,:,:])
+                    pred_embds.append((bottom_up*contrib_weights[:,:1,:,:] + prev_timestep*contrib_weights[:,1:2,:,:]) / \
+                                        (contrib_weights.sum(dim=1,keepdim=True)))
+                else:
+                    contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
+                    pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + prev_timestep*contrib_weights[:,1:2,:,:])
 
             level_sims.append(contrib_sims.mean((0,2,3)))
 
