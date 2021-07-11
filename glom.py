@@ -236,6 +236,8 @@ class GLOM(nn.Module):
                 level_embds = self.out_norm_bu[level](level_embds)
             else:
                 level_embds = self.out_norm_td[level](level_embds)
+        elif FLAGS.layer_norm == 'sub_mean':
+            level_embds = level_embds - level_embds.mean(dim=1,keepdim=True)
         else:
             level_embds = level_embds
 
@@ -320,9 +322,14 @@ class GLOM(nn.Module):
         return F.cross_entropy(all_sims/FLAGS.sim_temp,self.sim_target[:all_sims.shape[0]])
 
     def bu_sim_calc(self, bottom_up, embd):
-        bottom_up = F.normalize(bottom_up, dim=1)
-        embd = F.normalize(embd, dim=1)
-        sim = (bottom_up*embd).sum(dim=1,keepdim=True)
+        if FLAGS.sm_sim:
+            bottom_up_dist = F.softmax(bottom_up,dim=1)
+            embd_dist = F.softmax(embd,dim=1)
+            sim = (bottom_up_dist*embd_dist).sum(dim=1,keepdim=True) / (bottom_up_dist*bottom_up_dist).sum(dim=1,keepdim=True)
+        else:
+            bottom_up = F.normalize(bottom_up, dim=1)
+            embd = F.normalize(embd, dim=1)
+            sim = (bottom_up*embd).sum(dim=1,keepdim=True)
 
         return sim
 
@@ -346,11 +353,17 @@ class GLOM(nn.Module):
             if level < self.num_levels - 1:
                 bu_td_sim = self.bu_sim_calc(bottom_up, top_down)
                 contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_td_sim,bu_prev_sim],dim=1)
-                contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
+                if FLAGS.sm_sim:
+                    contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
+                else:
+                    contrib_weights = contrib_sims
                 pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:])
             else:
                 contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_prev_sim],dim=1)
-                contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
+                if FLAGS.sm_sim:
+                    contrib_weights = F.softmax(contrib_sims/FLAGS.weighting_temp,dim=1)
+                else:
+                    contrib_weights = contrib_sims
                 pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + prev_timestep*contrib_weights[:,1:2,:,:])
 
             level_sims.append(contrib_sims.mean((0,2,3)))
@@ -370,7 +383,10 @@ class GLOM(nn.Module):
             # certain threshold the embedding updates are stopped.
             with torch.no_grad():
                 level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
-                level_norms.append((torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean(),torch.norm(attention_embd,dim=1).mean()))
+                if level > 0:
+                    level_norms.append((torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean(),torch.norm(attention_embd,dim=1).mean()))
+                else:
+                    level_norms.append((torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean(),torch.norm(level_embds[level],dim=1).mean()))
 
                 if ts == FLAGS.timesteps-1:
                     if FLAGS.sim_target_att:
@@ -417,7 +433,7 @@ class GLOM(nn.Module):
 
             sims_log.append(sims)
             delta_log.append((deltas[0],deltas[2],deltas[4]))
-            norms_log.append((norms[1],norms[2],norms[3]))
+            norms_log.append((norms[0],norms[1],norms[2],norms[3],norms[4]))
 
         # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
         for t in range(FLAGS.timesteps):

@@ -34,26 +34,28 @@ flags.DEFINE_integer('num_neg_ts',1,'')
 flags.DEFINE_bool('sim_target_att',False,'')
 flags.DEFINE_bool('sg_target',True,'')
 flags.DEFINE_bool('l2_no_norm',False,'')
-flags.DEFINE_string('layer_norm','none','out,separate,none')
+flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean')
 
 # Forward Prediction flags
 flags.DEFINE_bool('spatial_att',True,'')
 
 # Timestep update flags
+flags.DEFINE_bool('sm_sim',False,'')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
 
 # Attention flags
 flags.DEFINE_float('temperature',0.3,'')
 flags.DEFINE_float('sim_temp',0.03,'')
-flags.DEFINE_float('weighting_temp',1.,'')
+flags.DEFINE_float('weighting_temp',0.5,'')
 flags.DEFINE_bool('l1_att',False,'')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
-flags.DEFINE_float('reg_coeff',0.01,'Regularization coefficient used for regularization loss')
+flags.DEFINE_float('reg_coeff',0.1,'Regularization coefficient used for regularization loss')
 flags.DEFINE_float('bu_coeff',1.,'Bottom-Up Loss Coefficient')
 flags.DEFINE_bool('linear_input',True,'')
 flags.DEFINE_bool('linear_reconst',True,'')
 flags.DEFINE_bool('train_input_cnn',False,'')
+flags.DEFINE_bool('train_reconst',True,'')
 
 flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
 flags.DEFINE_string('granularity','8,8,8,16,32','')
@@ -108,8 +110,9 @@ def main(argv):
     else:
         optimizer = torch.optim.AdamW(params=model.parameters(), lr=FLAGS.lr)
 
-    for par in model.reconstruction_net.parameters():
-        par.requires_grad = False
+    if not FLAGS.train_reconst:
+        for par in model.reconstruction_net.parameters():
+            par.requires_grad = False
 
     loss_func = torch.nn.MSELoss(reduction='mean')
 
@@ -167,24 +170,31 @@ def main(argv):
             for ts,ts_sims in enumerate(sims_log):
                 for level,lev_sims in enumerate(ts_sims):
                     if level < FLAGS.num_levels-1:
-                        log_dict['td_sim_l{}_t{}'.format(level,ts)] = lev_sims[1]
-                        log_dict['prev_sim_l{}_t{}'.format(level,ts)] = lev_sims[2]
+                        log_dict['td_sim_l{}_t{}'.format(level+1,ts)] = lev_sims[1]
+                        log_dict['prev_sim_l{}_t{}'.format(level+1,ts)] = lev_sims[2]
                     else:
-                        log_dict['prev_sim_l{}_t{}'.format(level,ts)] = lev_sims[1]
+                        log_dict['prev_sim_l{}_t{}'.format(level+1,ts)] = lev_sims[1]
 
             for ts,ts_delta,ts_norm in zip([0,1,2,3,4,5],delta_log, norms_log):
                 log_dict['delta_l1_t{}'.format(ts)] = ts_delta[0]
                 log_dict['delta_l3_t{}'.format(ts)] = ts_delta[1]
                 log_dict['delta_l5_t{}'.format(ts)] = ts_delta[2]
-                log_dict['bu_norm_l2_t{}'.format(ts)] = ts_norm[0][0]
-                log_dict['bu_norm_l3_t{}'.format(ts)] = ts_norm[1][0]
-                log_dict['bu_norm_l4_t{}'.format(ts)] = ts_norm[2][0]
-                log_dict['td_norm_l2_t{}'.format(ts)] = ts_norm[0][1]
-                log_dict['td_norm_l3_t{}'.format(ts)] = ts_norm[1][1]
-                log_dict['td_norm_l4_t{}'.format(ts)] = ts_norm[2][1]
-                log_dict['att_norm_l2_t{}'.format(ts)] = ts_norm[0][2]
-                log_dict['att_norm_l3_t{}'.format(ts)] = ts_norm[1][2]
-                log_dict['att_norm_l4_t{}'.format(ts)] = ts_norm[2][2]
+
+                log_dict['bu_norm_l2_t{}'.format(ts)] = ts_norm[1][0]
+                log_dict['bu_norm_l3_t{}'.format(ts)] = ts_norm[2][0]
+                log_dict['bu_norm_l4_t{}'.format(ts)] = ts_norm[3][0]
+                log_dict['bu_norm_l5_t{}'.format(ts)] = ts_norm[4][0]
+
+                log_dict['td_norm_l1_t{}'.format(ts)] = ts_norm[0][1]
+                log_dict['td_norm_l2_t{}'.format(ts)] = ts_norm[1][1]
+                log_dict['td_norm_l3_t{}'.format(ts)] = ts_norm[2][1]
+                log_dict['td_norm_l4_t{}'.format(ts)] = ts_norm[3][1]
+
+                log_dict['level_norm_l1_t{}'.format(ts)] = ts_norm[0][2]
+                log_dict['att_norm_l2_t{}'.format(ts)] = ts_norm[1][2]
+                log_dict['att_norm_l3_t{}'.format(ts)] = ts_norm[2][2]
+                log_dict['att_norm_l4_t{}'.format(ts)] = ts_norm[3][2]
+                log_dict['att_norm_l5_t{}'.format(ts)] = ts_norm[4][2]
 
             for ts_bu,ts_td in zip(bu_log, td_log):
                 log_dict['bu_loss_l2_t{}'.format(ts_bu[-1])] = ts_bu[0]
