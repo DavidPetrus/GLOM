@@ -32,8 +32,9 @@ flags.DEFINE_integer('num_neg_imgs',100,'')
 flags.DEFINE_integer('neg_per_ts',10,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
 flags.DEFINE_bool('sim_target_att',False,'')
+flags.DEFINE_bool('ff_target_att',False,'')
 flags.DEFINE_bool('sg_target',True,'')
-flags.DEFINE_bool('l2_no_norm',False,'')
+flags.DEFINE_bool('ff_sg_target',True,'')
 flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean')
 
 # Forward Prediction flags
@@ -42,7 +43,6 @@ flags.DEFINE_string('ff_att_type','separate','separate,same')
 flags.DEFINE_bool('ff_reg_td_bu',False,'')
 flags.DEFINE_float('ff_width',1.,'')
 flags.DEFINE_integer('ff_ts',1,'')
-flags.DEFINE_bool('spatial_att',True,'')
 
 # Timestep update flags
 flags.DEFINE_string('sim','none','none, sm_sim, ce_sim')
