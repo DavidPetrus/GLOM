@@ -324,7 +324,7 @@ class GLOM(nn.Module):
     def bu_sim_calc(self, bottom_up, embd):
         if FLAGS.sm_sim:
             bottom_up_dist = F.normalize(F.softmax(bottom_up,dim=1),dim=1)
-            embd_dist = (F.softmax(embd,dim=1),dim=1)
+            embd_dist = F.normalize(F.softmax(embd,dim=1),dim=1)
             sim = (bottom_up_dist*embd_dist).sum(dim=1,keepdim=True)
         else:
             bottom_up = F.normalize(bottom_up, dim=1)

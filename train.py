@@ -46,7 +46,7 @@ flags.DEFINE_integer('timesteps',6,'Number of timesteps')
 # Attention flags
 flags.DEFINE_float('temperature',0.3,'')
 flags.DEFINE_float('sim_temp',0.03,'')
-flags.DEFINE_float('weighting_temp',0.5,'')
+flags.DEFINE_float('weighting_temp',1.,'')
 flags.DEFINE_bool('l1_att',False,'')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
