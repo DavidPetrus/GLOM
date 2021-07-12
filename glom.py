@@ -340,7 +340,7 @@ class GLOM(nn.Module):
         else:
             bottom_up = F.normalize(bottom_up, dim=1)
             embd = F.normalize(embd, dim=1)
-            sim = (bottom_up*embd).sum(dim=1,keepdim=True)
+            sim = (bottom_up*embd).sum(dim=1,keepdim=True)/2. + 0.5
 
         return sim
 
@@ -367,7 +367,8 @@ class GLOM(nn.Module):
             if level < self.num_levels - 1:
                 bu_td_sim = self.bu_sim_calc(bottom_up, top_down)
                 contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_td_sim,bu_prev_sim],dim=1)
-                if FLAGS.sim != 'none':
+                #if FLAGS.sim != 'none':
+                if True:
                     contrib_weights = contrib_sims
                     pred_embds.append((bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:]) / \
                                         (contrib_weights.sum(dim=1,keepdim=True)))
@@ -376,7 +377,8 @@ class GLOM(nn.Module):
                     pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:])
             else:
                 contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_prev_sim],dim=1)
-                if FLAGS.sim != 'none':
+                #if FLAGS.sim != 'none':
+                if True:
                     contrib_weights = contrib_sims
                     pred_embds.append((bottom_up*contrib_weights[:,:1,:,:] + prev_timestep*contrib_weights[:,1:2,:,:]) / \
                                         (contrib_weights.sum(dim=1,keepdim=True)))
