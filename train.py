@@ -37,6 +37,11 @@ flags.DEFINE_bool('l2_no_norm',False,'')
 flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean')
 
 # Forward Prediction flags
+flags.DEFINE_bool('ff_att_mode',True,'')
+flags.DEFINE_string('ff_att_type','separate','separate,same')
+flags.DEFINE_bool('ff_reg_td_bu',False,'')
+flags.DEFINE_float('ff_width',1.,'')
+flags.DEFINE_integer('ff_ts',1,'')
 flags.DEFINE_bool('spatial_att',True,'')
 
 # Timestep update flags
@@ -62,6 +67,7 @@ flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
 flags.DEFINE_string('granularity','8,8,8,16,32','')
 flags.DEFINE_integer('embd_mult',16,'Embedding size relative to patch size')
 
+flags.DEFINE_integer('fast_forward_layers',3,'Number of layers for Fast-Forward network')
 flags.DEFINE_integer('bottom_up_layers',3,'Number of layers for Bottom-Up network')
 flags.DEFINE_integer('top_down_layers',3,'Number of layers for Top-Down network')
 flags.DEFINE_integer('input_cnn_depth',3,'Number of convolutional layers for input CNN')
@@ -99,7 +105,7 @@ def main(argv):
     #validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True)
 
     model = GLOM(num_levels=FLAGS.num_levels, embd_mult=FLAGS.embd_mult, granularity=granularity, bottom_up_layers=FLAGS.bottom_up_layers, 
-                top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
+                fast_forward_layers=FLAGS.fast_forward_layers , top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
     model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
