@@ -321,11 +321,22 @@ class GLOM(nn.Module):
 
         return F.cross_entropy(all_sims/FLAGS.sim_temp,self.sim_target[:all_sims.shape[0]])
 
-    def bu_sim_calc(self, bottom_up, embd):
-        if FLAGS.sm_sim:
+    def bu_sim_calc(self, bottom_up, embd, bu_bu=False):
+        if FLAGS.sim == 'sm_sim':
             bottom_up_dist = F.normalize(F.softmax(bottom_up,dim=1),dim=1)
             embd_dist = F.normalize(F.softmax(embd,dim=1),dim=1)
             sim = (bottom_up_dist*embd_dist).sum(dim=1,keepdim=True)
+        elif FLAGS.sim == 'ce_sim':
+            bottom_up_dist = F.softmax(bottom_up,dim=1)
+            embd_dist = F.softmax(embd,dim=1)
+            if FLAGS.sg_bu_sim:
+                entropy = (bottom_up_dist.detach() * torch.log(embd_dist)).sum(dim=1,keepdim=True)
+            else:
+                entropy = (bottom_up_dist * torch.log(embd_dist)).sum(dim=1,keepdim=True)
+            if bu_bu:
+                sim = -1./(entropy+0.001)
+            else:
+                sim = (-1./(entropy+0.001))/self.bu_bu_sim
         else:
             bottom_up = F.normalize(bottom_up, dim=1)
             embd = F.normalize(embd, dim=1)
@@ -349,11 +360,14 @@ class GLOM(nn.Module):
 
             prev_timestep = level_embds[level]
 
+            if FLAGS.sim == 'ce_sim':
+                self.bu_bu_sim = self.bu_sim_calc(bottom_up, bottom_up, bu_bu=True)
+
             bu_prev_sim = self.bu_sim_calc(bottom_up, prev_timestep)
             if level < self.num_levels - 1:
                 bu_td_sim = self.bu_sim_calc(bottom_up, top_down)
                 contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_td_sim,bu_prev_sim],dim=1)
-                if FLAGS.sm_sim:
+                if FLAGS.sim != 'none':
                     contrib_weights = contrib_sims
                     pred_embds.append((bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:]) / \
                                         (contrib_weights.sum(dim=1,keepdim=True)))
@@ -362,7 +376,7 @@ class GLOM(nn.Module):
                     pred_embds.append(bottom_up*contrib_weights[:,:1,:,:] + top_down*contrib_weights[:,1:2,:,:] + prev_timestep*contrib_weights[:,2:3,:,:])
             else:
                 contrib_sims = torch.cat([self.bu_sim[:,:,:h,:w],bu_prev_sim],dim=1)
-                if FLAGS.sm_sim:
+                if FLAGS.sim != 'none':
                     contrib_weights = contrib_sims
                     pred_embds.append((bottom_up*contrib_weights[:,:1,:,:] + prev_timestep*contrib_weights[:,1:2,:,:]) / \
                                         (contrib_weights.sum(dim=1,keepdim=True)))

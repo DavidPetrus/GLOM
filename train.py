@@ -40,7 +40,8 @@ flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean')
 flags.DEFINE_bool('spatial_att',True,'')
 
 # Timestep update flags
-flags.DEFINE_bool('sm_sim',False,'')
+flags.DEFINE_string('sim','none','none, sm_sim, ce_sim')
+flags.DEFINE_bool('sg_bu_sim',True,'')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
 
 # Attention flags
