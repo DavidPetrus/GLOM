@@ -45,6 +45,7 @@ flags.DEFINE_float('ff_width',1.,'')
 flags.DEFINE_integer('ff_ts',1,'')
 
 # Timestep update flags
+flags.DEFINE_string('td_new_frame','only_ff','all, only_ff')
 flags.DEFINE_string('sim','none','none, sm_sim, ce_sim')
 flags.DEFINE_bool('sg_bu_sim',True,'')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
