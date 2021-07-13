@@ -28,8 +28,8 @@ flags.DEFINE_float('masked_fraction',0.,'Fraction of input image that is masked'
 flags.DEFINE_bool('only_reconst',False,'')
 
 # Contrastive learning flags
-flags.DEFINE_integer('num_neg_imgs',100,'')
-flags.DEFINE_integer('neg_per_ts',10,'')
+flags.DEFINE_integer('num_neg_imgs',50,'')
+flags.DEFINE_integer('neg_per_ts',2,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
 flags.DEFINE_bool('sim_target_att',False,'')
 flags.DEFINE_bool('ff_target_att',False,'')
@@ -45,7 +45,6 @@ flags.DEFINE_float('ff_width',1.,'')
 flags.DEFINE_integer('ff_ts',1,'')
 
 # Timestep update flags
-flags.DEFINE_string('td_new_frame','only_ff','all, only_ff')
 flags.DEFINE_string('sim','none','none, sm_sim, ce_sim')
 flags.DEFINE_bool('sg_bu_sim',True,'')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
