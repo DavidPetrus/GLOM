@@ -7,7 +7,8 @@ import datetime
 from nfnets.agc import AGC
 
 from glom import GLOM
-from dataloader import Dataset
+from dataloader import JHMDB_Dataset
+from utils import parse_logs, calculate_vars
 
 from sklearn.decomposition import PCA
 
@@ -29,7 +30,7 @@ flags.DEFINE_bool('only_reconst',False,'')
 flags.DEFINE_integer('frame_log',2,'')
 
 # Contrastive learning flags
-flags.DEFINE_integer('num_neg_imgs',50,'')
+flags.DEFINE_integer('num_neg_imgs',10,'')
 flags.DEFINE_integer('neg_per_ts',2,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
 flags.DEFINE_bool('sim_target_att',False,'')
@@ -43,22 +44,19 @@ flags.DEFINE_bool('ff_att_mode',True,'')
 flags.DEFINE_string('ff_att_type','separate','separate,same')
 flags.DEFINE_bool('ff_reg_td_bu',False,'')
 flags.DEFINE_float('ff_width',1.,'')
-flags.DEFINE_integer('ff_ts',1,'')
+flags.DEFINE_integer('ff_ts',2,'')
 
 # Timestep update flags
-flags.DEFINE_string('sim','none','none, sm_sim, ce_sim')
-flags.DEFINE_bool('sg_bu_sim',True,'')
+flags.DEFINE_string('sim','none','none, sm_sim')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
 
 # Attention flags
 flags.DEFINE_float('temperature',0.3,'')
 flags.DEFINE_float('sim_temp',0.03,'')
-flags.DEFINE_float('weighting_temp',1.,'')
 flags.DEFINE_bool('l1_att',False,'')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
 flags.DEFINE_float('reg_coeff',0.1,'Regularization coefficient used for regularization loss')
-flags.DEFINE_float('bu_coeff',1.,'Bottom-Up Loss Coefficient')
 flags.DEFINE_bool('linear_input',True,'')
 flags.DEFINE_bool('linear_reconst',True,'')
 flags.DEFINE_bool('train_input_cnn',False,'')
@@ -85,12 +83,16 @@ def main(argv):
     wandb.save("utils.py")
     wandb.config.update(flags.FLAGS)
 
-    train_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/work_place/*/*.jpg") + \
-                   glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
+    #train_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/work_place/*/*.jpg") + \
+    #               glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
     #val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
 
-    print("Num train images:",len(train_images))
-    #print("Num val images:",len(val_images))
+    all_vids = glob.glob("/home/petrus/JHMDB_dataset/JHMDB_video/ReCompress_Videos/*/*")
+    train_vids = all_vids[:800]
+    validation_vids = all_vids[800:]
+
+    print("Num train videos:",len(train_vids))
+    print("Num val videos:",len(validation_vids))
 
     pca = PCA(n_components=20)
 
@@ -99,17 +101,17 @@ def main(argv):
 
     granularity = [int(patch_size) for patch_size in FLAGS.granularity.split(',')]
 
-    training_set = Dataset(train_images, granularity)
+    training_set = JHMDB_Dataset(train_vids, granularity)
     training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
-    #validation_set = Dataset(val_images)
-    #validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True)
+    validation_set = JHMDB_Dataset(validation_vids, granularity)
+    validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
     model = GLOM(num_levels=FLAGS.num_levels, embd_mult=FLAGS.embd_mult, granularity=granularity, bottom_up_layers=FLAGS.bottom_up_layers, 
                 fast_forward_layers=FLAGS.fast_forward_layers , top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
-    model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
-    model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
+    #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
+    #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
     #model.load_state_dict(torch.load('weights/9July6.pt'))
 
     if FLAGS.use_agc:
@@ -122,10 +124,7 @@ def main(argv):
         for par in model.reconstruction_net.parameters():
             par.requires_grad = False
 
-    loss_func = torch.nn.MSELoss(reduction='mean')
-
     model.to('cuda')
-    model.train()
 
     #torch.autograd.set_detect_anomaly(True)
 
@@ -134,28 +133,28 @@ def main(argv):
     total_loss = 0.
     train_iter = 0
     for epoch in range(10000):
-        
-        for masked_load, target_load in training_generator:
+        model.train()
+        for frames_load in training_generator:
             # Set optimzer gradients to zero
             optimizer.zero_grad()
 
-            masked_image = masked_load.to('cuda')
-            target_image = target_load.to('cuda')
+            frames = [frame.to('cuda') for frame in frames_load]
 
             losses, logs = model.forward_video(frames)
 
-            reconstruction_loss = 100.*loss_func(target_image,reconstructed_image)
-            final_loss = reconstruction_loss + FLAGS.reg_coeff*(FLAGS.bu_coeff*bottom_up_loss+top_down_loss)
+            reconstruction_loss,ff_loss,bu_loss,td_loss = losses
+            final_loss = reconstruction_loss + FLAGS.reg_coeff*(ff_loss+bu_loss+td_loss)
 
             # Calculate gradients of the weights
             final_loss.backward()
 
             train_iter += 1
-            log_dict = {"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss": reconstruction_loss,
-                        "Bottom-Up Loss": bottom_up_loss, "Top-Down Loss":top_down_loss}
+            log_dict = {"Epoch":epoch,"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss": reconstruction_loss,
+                        "Fast-Forward Loss":ff_loss, "Bottom-Up Loss": bu_loss, "Top-Down Loss":td_loss}
 
             # Update the weights
             if FLAGS.clip_grad > 0. and not FLAGS.use_agc:
+                log_dict['ff_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.fast_forward_net.parameters(), FLAGS.clip_grad)
                 log_dict['bu_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.bottom_up_net.parameters(), FLAGS.clip_grad)
                 log_dict['td_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.top_down_net.parameters(), FLAGS.clip_grad)
 
@@ -163,70 +162,9 @@ def main(argv):
 
             if train_iter % 100 == 0:
                 print(log_dict)
+                log_dict = calculate_vars(log_dict,level_embds,pca)
                 
-                for l_ix, embd_tensor in enumerate(level_embds):
-                    embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
-                    _,l_h,l_w,_ = embds.shape
-                    embds = embds.reshape(l_h*l_w,-1)
-
-                    fitted = pca.fit(embds)
-                    log_dict['var_comp1_l{}'.format(l_ix+1)] = fitted.explained_variance_[0]
-                    log_dict['var_comp2_l{}'.format(l_ix+1)] = fitted.explained_variance_[1]
-                    log_dict['var_comp3_l{}'.format(l_ix+1)] = fitted.explained_variance_[2]
-                    log_dict['var_comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8].sum()
-                    log_dict['var_comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
-
-            for all_img_logs in logs:
-                if frame_log[0] == FLAGS.frame_log:
-                    min_level,reconst_logs,reg_logs,ff_logs,frame_logs = all_img_logs
-                    ff_loss, bu_log, td_log =  reg_logs
-                    for ts in range(FLAGS.timesteps):
-                        if ts in [0,1,4,5]:
-                            deltas, norms, sims = frame_logs[ts]
-                            for l in range(FLAGS.num_levels):
-                                if l<FLAGS.num_levels-1:
-                                    log_dict['bu_loss_l{}_t{}'.format(l+2,ts)] = bu_log[ts][l]
-                                    log_dict['td_loss_l{}_t{}'.format(l+1,ts)] = td_log[ts][l]
-
-                                log_dict['delta_l{}_t{}'.format(l+1,ts)] = deltas[l]
-                                log_dict['sims_l{}_t{}'.format(l+1,ts)] = sims[l]
-                                if l in [0,2,4] and ts in [0,1,FLAGS.timesteps-1]:
-                                    log_dict['level_norm_l{}_t{}'.format(l+1,ts)] = norms[l][0]
-                                    log_dict['bu_norm_l{}_t{}'.format(l+1,ts)] = norms[l][1]
-                                    if l<FLAGS.num_levels-1:
-                                        log_dict['td_norm_l{}_t{}'.format(l+1,ts)] = norms[l][2]
-
-                    for ts in range(FLAGS.ff_ts):
-                        deltas, norms, sims = ff_logs[ts]
-                        for l in range(FLAGS.num_levels):
-                            log_dict['ff_lev_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][0]
-                            log_dict['ff_bu_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][1]
-                            log_dict['ff_td_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][2]
-
-                elif all_img_logs[0] == 0:
-                    min_level, reconst_loss = all_img_logs
-                    log_dict['reconst_loss_f0'] = reconst_loss
-                    continue
-                else:
-                    min_level,reconst_logs,reg_logs,ff_logs = all_img_logs
-                    ff_loss = reg_logs[0]
-
-                log_dict['reconst_loss_f{}'.format(min_level)] = reconst_logs[0]
-                log_dict['ff_reconst_loss_f{}'.format(min_level)] = reconst_logs[1]
-
-                for ts in range(FLAGS.ff_ts):
-                    deltas, norms, sims = ff_logs[ts]
-                    for l in range(FLAGS.num_levels):
-                        log_dict['ff_delta_l{}_f{}_t{}'.format(l+1,min_level,ts)] = deltas[l]
-                        log_dict['ff_sims_l{}_f{}_t{}'.format(l+1,min_level,ts)] = sims[l]
-
-                ff_out_norm,ff_in_norm = ff_logs[-1]
-                for l in range(FLAGS.num_levels):
-                    log_dict['ff_loss_l{}_f{}'.format(l+1,min_level)] = ff_loss[l]
-                    log_dict['ff_pred_norm_l{}_f{}'.format(l+1,min_level)] = ff_in_norm[l]
-                    log_dict['ff_final_norm_l{}_f{}'.format(l+1,min_level)] = ff_out_norm[l]
-                    
-
+            log_dict = parse_logs(log_dict,logs)
             wandb.log(log_dict)
 
             if train_iter > 1000 and train_iter%100==0:
@@ -237,38 +175,51 @@ def main(argv):
                 #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0]))
                 #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0]))
 
-            '''_,img_height,img_width,_ = target_image.shape
-            for l_ix, embd_tensor in enumerate(level_embds):
-                embds = embd_tensor.movedim(1,3).detach().cpu().numpy()
-                _,l_h,l_w,_ = embds.shape
-                embds = embds.reshape(l_h*l_w,-1)
+        model.eval()
+        for frames_load in validation_generator:
+            with torch.no_grad():
+                frames = [frame.to('cuda') for frame in frames_load]
 
-                fitted = pca.fit(embds)
-                print(l_ix, fitted.explained_variance_ratio_)
-                comps = fitted.transform(embds)
-                comps = comps-comps.min()
-                comps = comps/comps.max()
-                comps = comps.reshape(l_h,l_w,20)[:,:,:3]
-                comps = np.repeat(comps, granularity[l_ix], axis=0)
-                comps = np.repeat(comps, granularity[l_ix], axis=1)
-                cv2.imshow(str(l_ix+1),comps)
+                losses, logs = model.forward_video(frames)
+
+                reconstruction_loss,ff_loss,bu_loss,td_loss = losses
+                #final_loss = reconstruction_loss + FLAGS.reg_coeff*(ff_loss+bu_loss+td_loss)
+
+                log_dict = {"Epoch":epoch,"Val Reconstruction Loss": reconstruction_loss,
+                            "Val Fast-Forward Loss":ff_loss, "Val Bottom-Up Loss": bu_loss, "Val Top-Down Loss":td_loss}
+                wandb.log(log_dict)
+
+        print("Epoch {}".format(epoch))
+        print(log_dict)
+
+        '''_,img_height,img_width,_ = target_image.shape
+        for l_ix, embd_tensor in enumerate(level_embds):
+            embds = embd_tensor.movedim(1,3).detach().cpu().numpy()
+            _,l_h,l_w,_ = embds.shape
+            embds = embds.reshape(l_h*l_w,-1)
+
+            fitted = pca.fit(embds)
+            print(l_ix, fitted.explained_variance_ratio_)
+            comps = fitted.transform(embds)
+            comps = comps-comps.min()
+            comps = comps/comps.max()
+            comps = comps.reshape(l_h,l_w,20)[:,:,:3]
+            comps = np.repeat(comps, granularity[l_ix], axis=0)
+            comps = np.repeat(comps, granularity[l_ix], axis=1)
+            cv2.imshow(str(l_ix+1),comps)
 
 
-            imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
-            imshow = np.clip(imshow,0,255)
-            imshow = imshow.astype(np.uint8)
-            targ = target_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
-            targ = targ.astype(np.uint8)
-            cv2.imshow('pred',imshow)
-            cv2.imshow('target',targ)
-            key = cv2.waitKey(0)
-            if key==27:
-                cv2.destroyAllWindows()
-                exit()'''
-
-                
-                
-
+        imshow = reconstructed_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
+        imshow = np.clip(imshow,0,255)
+        imshow = imshow.astype(np.uint8)
+        targ = target_image[0].detach().movedim(0,2).cpu().numpy() * 255. # * IMAGENET_DEFAULT_STD + IMAGENET_DEFAULT_MEAN
+        targ = targ.astype(np.uint8)
+        cv2.imshow('pred',imshow)
+        cv2.imshow('target',targ)
+        key = cv2.waitKey(0)
+        if key==27:
+            cv2.destroyAllWindows()
+            exit()'''
         
 
 if __name__ == '__main__':

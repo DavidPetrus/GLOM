@@ -47,6 +47,13 @@ class GLOM(nn.Module):
         self.strides = [2 if self.granularity[l]<self.granularity[l+1] else 1 for l in range(self.num_levels-1)]
         self.embd_dims = [embd_mult*patch_size for patch_size in granularity]
 
+        img_h = 256
+        img_w = 320
+        l1_h = 32
+        l1_w = 40
+        grid_size = max(l1_h,l1_w)
+        self.level_size = [(int(img_h/patch_size),int(img_w/patch_size)) for patch_size in granularity]
+
         self.neg_embds = [None for l in range(self.num_levels)]
         self.temp_neg = [[] for l in range(self.num_levels)]
         self.bank_full = False
@@ -72,10 +79,10 @@ class GLOM(nn.Module):
         self.num_samples = 20
 
         self.zero_tensor = torch.zeros([1,1], device='cuda')
-        self.ones_tensor = torch.ones([1,1,64,64], device='cuda')
-        self.sim_target = torch.zeros(4096,dtype=torch.long,device='cuda')
+        self.ones_tensor = torch.ones([1,1,l1_h,l1_w], device='cuda')
+        self.sim_target = torch.zeros(l1_h*l1_w,dtype=torch.long,device='cuda')
 
-        att_stds = [int(1/self.granularity[l]*2**(l+3)) for l in range(1,self.num_levels)]
+        att_stds = [int(1/self.granularity[l]*2**(l+2)) for l in range(1,self.num_levels)]
         self.probs = {}
         for l,patch_size in zip(range(self.num_levels), self.granularity):
             if self.att_w[l] == 0.: continue
@@ -85,11 +92,10 @@ class GLOM(nn.Module):
                 continue
 
             std = att_stds[l-1]
-            grid_size = 512//patch_size
-            stds = np.arange(0,grid_size,dtype=np.float32)/std
-            stds = np.tile(stds.reshape(grid_size,1),(1,grid_size)).reshape(grid_size,grid_size,1)
-            std_mat = np.concatenate([stds,np.moveaxis(stds,0,1)],axis=2)
-            dists = scipy.spatial.distance.cdist(std_mat.reshape(-1,2),std_mat.reshape(-1,2))
+            inv_stds = np.arange(0,grid_size,dtype=np.float32)/std
+            inv_stds = np.tile(inv_stds.reshape(grid_size,1),(1,grid_size)).reshape(grid_size,grid_size,1)
+            inv_std_mat = np.concatenate([inv_stds,np.moveaxis(inv_stds,0,1)],axis=2)
+            dists = scipy.spatial.distance.cdist(inv_std_mat.reshape(-1,2),inv_std_mat.reshape(-1,2))
             probs = scipy.stats.norm.cdf(dists+1/std)-scipy.stats.norm.cdf(dists)
             np.fill_diagonal(probs,0.)
             probs = torch.tensor(np.reshape(probs,(grid_size,grid_size,grid_size,grid_size)),device='cuda')
@@ -115,7 +121,11 @@ class GLOM(nn.Module):
             self.position_pred = nn.ModuleList([nn.Conv2d(self.embd_dims[l],4,kernel_size=1,stride=1) for l in range(self.num_levels)])
             h_mat, w_mat = self.generate_positional_encoding(3,3,num_pos_freqs=1)
             self.ff_pos_queries = torch.cat([h_mat.tile((1,1,1,3)),w_mat.tile((1,1,3,1))],dim=1).movedim(1,3).reshape(9,4,1,1)
-            print(self.ff_pos_queries)
+
+        self.position_encoding = []
+        for l in range(self.num_levels-1):
+            height_pos,width_pos = self.generate_positional_encoding(self.level_size[l][0],self.level_size[l][1])
+            self.position_encoding.append(torch.cat([height_pos.tile((1,1,1,self.level_size[l][1])),width_pos.tile((1,1,self.level_size[l][0],1))],dim=1))
 
         self.input_cnn = self.build_input_cnn()
         self.build_reconstruction_net()
@@ -185,7 +195,7 @@ class GLOM(nn.Module):
     def build_input_cnn(self):
         # Input CNN used to initialize the embeddings at each of the levels (see pg 13: 3.5 The Visual Input)
         if FLAGS.linear_input:
-            return nn.Conv2d(4,self.embd_dims[0],kernel_size=self.granularity[0],stride=self.granularity[0])
+            return nn.Conv2d(3,self.embd_dims[0],kernel_size=self.granularity[0],stride=self.granularity[0])
         else:
             cnn_channels = [4,self.embd_dims[0]//4,self.embd_dims[0]//2,self.embd_dims[0],self.embd_dims[0]]
             cnn_layers = []
@@ -301,8 +311,7 @@ class GLOM(nn.Module):
         else:
             rep_embds = embeddings
 
-        height_pos,width_pos = self.generate_positional_encoding(rep_embds.shape[2],rep_embds.shape[3])
-        cat_embds = torch.cat([rep_embds,height_pos.tile((1,1,1,rep_embds.shape[3])),width_pos.tile((1,1,rep_embds.shape[2],1))],dim=1)
+        cat_embds = torch.cat([rep_embds,self.position_encoding[level]],dim=1)
         
         return self.top_down_net[level](cat_embds)
 
@@ -314,15 +323,15 @@ class GLOM(nn.Module):
         pos_pred = self.position_pred[level](ff_pred)
 
         pos_preds_distribute = torch.cat([
-            nn.ZeroPad2d(pos_pred,(0,2,0,2)),
-            nn.ZeroPad2d(pos_pred,(1,1,0,2)),
-            nn.ZeroPad2d(pos_pred,(2,0,0,2)),
-            nn.ZeroPad2d(pos_pred,(0,2,1,1)),
-            nn.ZeroPad2d(pos_pred,(1,1,1,1)),
-            nn.ZeroPad2d(pos_pred,(2,0,1,1)),
-            nn.ZeroPad2d(pos_pred,(0,2,2,0)),
-            nn.ZeroPad2d(pos_pred,(1,1,2,0)),
-            nn.ZeroPad2d(pos_pred,(2,0,2,0))
+            F.pad(pos_pred,(0,2,0,2)),
+            F.pad(pos_pred,(1,1,0,2)),
+            F.pad(pos_pred,(2,0,0,2)),
+            F.pad(pos_pred,(0,2,1,1)),
+            F.pad(pos_pred,(1,1,1,1)),
+            F.pad(pos_pred,(2,0,1,1)),
+            F.pad(pos_pred,(0,2,2,0)),
+            F.pad(pos_pred,(1,1,2,0)),
+            F.pad(pos_pred,(2,0,2,0))
             ], dim=0)[:,:,1:-1,1:-1] # 9,4,h,w
 
         dot_prod = (pos_preds_distribute * self.ff_pos_queries).sum(1,keepdim=True)
@@ -330,15 +339,15 @@ class GLOM(nn.Module):
         location_weights = F.softmax(dot_prod,dim=0) # 9,1,h,w
 
         ff_preds_distribute = torch.cat([
-            nn.ZeroPad2d(ff_pred,(0,2,0,2)),
-            nn.ZeroPad2d(ff_pred,(1,1,0,2)),
-            nn.ZeroPad2d(ff_pred,(2,0,0,2)),
-            nn.ZeroPad2d(ff_pred,(0,2,1,1)),
-            nn.ZeroPad2d(ff_pred,(1,1,1,1)),
-            nn.ZeroPad2d(ff_pred,(2,0,1,1)),
-            nn.ZeroPad2d(ff_pred,(0,2,2,0)),
-            nn.ZeroPad2d(ff_pred,(1,1,2,0)),
-            nn.ZeroPad2d(ff_pred,(2,0,2,0))
+            F.pad(ff_pred,(0,2,0,2)),
+            F.pad(ff_pred,(1,1,0,2)),
+            F.pad(ff_pred,(2,0,0,2)),
+            F.pad(ff_pred,(0,2,1,1)),
+            F.pad(ff_pred,(1,1,1,1)),
+            F.pad(ff_pred,(2,0,1,1)),
+            F.pad(ff_pred,(0,2,2,0)),
+            F.pad(ff_pred,(1,1,2,0)),
+            F.pad(ff_pred,(2,0,2,0))
             ], dim=0)[:,:,1:-1,1:-1] # 9,c,h,w
 
         ff_out = (ff_preds_distribute * location_weights).sum(0,keepdim=True)
@@ -401,17 +410,6 @@ class GLOM(nn.Module):
             attractor_dist = F.normalize(F.softmax(attractor,dim=1),dim=1)
             embd_dist = F.normalize(F.softmax(embd,dim=1),dim=1)
             sim = (attractor_dist*embd_dist).sum(dim=1,keepdim=True)
-        elif FLAGS.sim == 'ce_sim':
-            attractor_dist = F.softmax(attractor,dim=1)
-            embd_dist = F.softmax(embd,dim=1)
-            if FLAGS.sg_bu_sim:
-                entropy = (attractor_dist.detach() * torch.log(embd_dist)).sum(dim=1,keepdim=True)
-            else:
-                entropy = (attractor_dist * torch.log(embd_dist)).sum(dim=1,keepdim=True)
-            if bu_bu:
-                sim = -1./(entropy+0.001)
-            else:
-                sim = (-1./(entropy+0.001))/self.bu_bu_sim
         else:
             attractor = F.normalize(attractor, dim=1)
             embd = F.normalize(embd, dim=1)
@@ -459,7 +457,7 @@ class GLOM(nn.Module):
         return losses, logs
 
 
-    def update_embeddings(self, level_embds, ts, embd_input, store_embds=False, log=False):
+    def update_embeddings(self, level_embds, ts, embd_input, log=False):
         level_deltas = []
         level_norms = []
         level_sims = []
@@ -467,6 +465,7 @@ class GLOM(nn.Module):
         for level in range(self.num_levels):
             bottom_no_norm = self.bottom_up_net[level-1](level_embds[level-1]) if level > 0 else embd_input
             bottom_up = self.layer_normalize(bottom_no_norm,level,bu=True)
+            bs,c,h,w = bottom_up.shape
 
             if level < self.num_levels-1 and level_embds[level+1] is not None:
                 top_no_norm = self.top_down(level_embds[level+1], level)
@@ -483,7 +482,6 @@ class GLOM(nn.Module):
                     contrib_sims = self.zero_tensor.reshape(1,1,1,1)
                 prev_timestep = self.zero_tensor.reshape(1,1,1,1)
             else:
-                bs,c,h,w = level_embds[level].shape
                 prev_timestep = level_embds[level]
 
                 bu_prev_sim = self.attractor_sim_calc(bottom_up, prev_timestep)
@@ -503,7 +501,7 @@ class GLOM(nn.Module):
             if self.bank_full:
                 if level > 0:
                     self.all_bu[level].append(bottom_up)
-                if level < self.num_levels-1
+                if level < self.num_levels-1:
                     self.all_td[level].append(top_down)
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
@@ -544,7 +542,7 @@ class GLOM(nn.Module):
 
         # Keep on updating embeddings for t timesteps
         for t in range(FLAGS.timesteps):
-            level_embds, pred_embds, ts_logs = self.update_embeddings(level_embds, t, embd_input, store_embds=store_embds, log=log)
+            level_embds, pred_embds, ts_logs = self.update_embeddings(level_embds, t, embd_input, log=log)
             if log:
                 logs.append(ts_logs)
 
@@ -560,25 +558,24 @@ class GLOM(nn.Module):
         total_td_loss = 0.
 
         frame_idxs = [len(frames)-1]
-        for l in range(self.num_levels-1,-1,-1):
-            frame_idxs.append(np.random.randint(l+1, frame_idxs[-1]))
+        frame_idxs.append(np.random.randint(1, frame_idxs[-1]))
         frame_idxs = [0] + frame_idxs[::-1]
         print(frame_idxs)
 
         logs = []
-
         ff_level_feed = None
+        min_level = 0
 
         for f_idx,frame in enumerate(frames):
             if f_idx in frame_idxs:
-                min_level = max(frame_idxs.index(f_idx),1)
                 log_frame = min_level==FLAGS.frame_log
+                min_level += 1
                 if f_idx > 0:
                     ff_reconst_img, ff_level_embds, ff_pred_embds, ff_logs = self.predict_next_frame(ff_level_embds, min_level=1, log=log_frame)
                     if FLAGS.ff_sg_target:
-                        ff_level_feed = [ff_level if l_ix>=min_level-1 else None for l_ix in ff_level_embds]
+                        ff_level_feed = [ff_level if l_ix>=min_level-1 else None for l_ix,ff_level in enumerate(ff_level_embds)]
                     else:
-                        ff_level_feed = [ff_level.detach() if l_ix>=min_level-1 else None for l_ix in ff_level_embds]
+                        ff_level_feed = [ff_level.detach() if l_ix>=min_level-1 else None for l_ix,ff_level in enumerate(ff_level_embds)]
 
                 reconst_img, level_embds, pred_embds, frame_logs = self.forward_single_image(frame, level_embds=ff_level_feed, log=log_frame)
                 if f_idx == 0:
@@ -652,7 +649,7 @@ class GLOM(nn.Module):
                             ff_no_norm = self.fast_forward_level(level_embds[level], level)
                             ff_embds = self.layer_normalize(ff_no_norm, level)
                             with torch.no_grad():
-                                ff_norms.append(torch.norm(ff_embds[level],dim=1).mean())
+                                ff_norms.append(torch.norm(ff_embds,dim=1).mean())
                         else:
                             ff_embds = level_embds[level]
                         prev_timestep = ff_embds
@@ -688,7 +685,7 @@ class GLOM(nn.Module):
                     level_sims.append(contrib_sims.mean((0,2,3)))
                     level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
                     if log:
-                        if level == min_level-1:
+                        if ts == 0 or level == min_level-1:
                             level_norms.append((torch.norm(level_embds[level],dim=1).mean(),0.,torch.norm(top_down,dim=1).mean()))
                         else:
                             level_norms.append((torch.norm(level_embds[level],dim=1).mean(),torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean()))
@@ -734,8 +731,7 @@ class GLOM(nn.Module):
 
         # Keep on updating embeddings for t timesteps
         for t in range(FLAGS.timesteps):
-            store_embds = True if t in neg_ts else False
-            level_embds, pred_embds, deltas, norms, sims = self.update_embeddings(level_embds, t, embd_input, store_embds=store_embds)
+            level_embds, pred_embds, deltas, norms, sims = self.update_embeddings(level_embds, t, embd_input)
 
             sims_log.append(sims)
             delta_log.append((deltas[0],deltas[2],deltas[4]))
