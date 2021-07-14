@@ -27,7 +27,8 @@ flags.DEFINE_integer('min_crop_size',24,'Minimum size of cropped region')
 flags.DEFINE_integer('max_crop_size',64,'Maximum size of cropped region')
 flags.DEFINE_float('masked_fraction',0.,'Fraction of input image that is masked')
 flags.DEFINE_bool('only_reconst',False,'')
-flags.DEFINE_integer('frame_log',2,'')
+flags.DEFINE_integer('skip_frames',3,'')
+flags.DEFINE_integer('frame_log',1,'')
 
 # Contrastive learning flags
 flags.DEFINE_integer('num_neg_imgs',10,'')
@@ -140,7 +141,7 @@ def main(argv):
 
             frames = [frame.to('cuda') for frame in frames_load]
 
-            losses, logs = model.forward_video(frames)
+            losses, logs, level_embds = model.forward_video(frames)
 
             reconstruction_loss,ff_loss,bu_loss,td_loss = losses
             final_loss = reconstruction_loss + FLAGS.reg_coeff*(ff_loss+bu_loss+td_loss)
@@ -164,7 +165,8 @@ def main(argv):
                 print(log_dict)
                 log_dict = calculate_vars(log_dict,level_embds,pca)
                 
-            log_dict = parse_logs(log_dict,logs)
+            if model.bank_full:
+                log_dict = parse_logs(log_dict,logs)
             wandb.log(log_dict)
 
             if train_iter > 1000 and train_iter%100==0:

@@ -85,7 +85,7 @@ def parse_logs(log_dict,logs):
                     else:
                         log_dict['ff_td_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][1]
 
-        elif all_img_logs[0] == 0:
+        elif all_img_logs[0] == -1:
             min_level, reconst_loss = all_img_logs
             log_dict['reconst_loss_f0'] = reconst_loss
             continue

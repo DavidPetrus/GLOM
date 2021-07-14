@@ -9,7 +9,36 @@ from absl import flags
 FLAGS = flags.FLAGS
 
 
-class Dataset(torch.utils.data.Dataset):
+class JHMDB_Dataset(torch.utils.data.Dataset):
+
+  def __init__(self, video_files, granularity, labels=None):
+
+        #self.labels = labels
+        self.video_files = video_files
+        self.granularity = granularity
+
+  def __len__(self):
+        return len(self.video_files)
+
+  def __getitem__(self, index):
+        # Select sample
+        video_file = self.video_files[index]
+        video_cap = cv2.VideoCapture(video_file)
+        frames = []
+        while True:
+            ret,frame = video_cap.read()
+            if not ret:
+                break
+
+            frame = cv2.copyMakeBorder(frame,0,16,0,0,cv2.BORDER_CONSTANT,value=[122,122,122])
+            frame = normalize_image(frame)
+            frame = torch.from_numpy(np.ascontiguousarray(frame))
+            frames.append(torch.movedim(frame,2,0))
+
+        return frames
+
+
+class ADE20k_Dataset(torch.utils.data.Dataset):
 
   def __init__(self, image_files, granularity, labels=None):
 
