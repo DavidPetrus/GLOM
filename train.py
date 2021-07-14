@@ -26,6 +26,7 @@ flags.DEFINE_integer('min_crop_size',24,'Minimum size of cropped region')
 flags.DEFINE_integer('max_crop_size',64,'Maximum size of cropped region')
 flags.DEFINE_float('masked_fraction',0.,'Fraction of input image that is masked')
 flags.DEFINE_bool('only_reconst',False,'')
+flags.DEFINE_integer('frame_log',2,'')
 
 # Contrastive learning flags
 flags.DEFINE_integer('num_neg_imgs',50,'')
@@ -141,7 +142,8 @@ def main(argv):
             masked_image = masked_load.to('cuda')
             target_image = target_load.to('cuda')
 
-            reconstructed_image, bottom_up_loss, top_down_loss, delta_log, norms_log, bu_log, td_log, sims_log, level_embds = model(masked_image)
+            losses, logs = model.forward_video(frames)
+
             reconstruction_loss = 100.*loss_func(target_image,reconstructed_image)
             final_loss = reconstruction_loss + FLAGS.reg_coeff*(FLAGS.bu_coeff*bottom_up_loss+top_down_loss)
 
@@ -174,44 +176,56 @@ def main(argv):
                     log_dict['var_comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8].sum()
                     log_dict['var_comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
 
-            for ts,ts_sims in enumerate(sims_log):
-                for level,lev_sims in enumerate(ts_sims):
-                    if level < FLAGS.num_levels-1:
-                        log_dict['td_sim_l{}_t{}'.format(level+1,ts)] = lev_sims[1]
-                        log_dict['prev_sim_l{}_t{}'.format(level+1,ts)] = lev_sims[2]
-                    else:
-                        log_dict['prev_sim_l{}_t{}'.format(level+1,ts)] = lev_sims[1]
+            for all_img_logs in logs:
+                if frame_log[0] == FLAGS.frame_log:
+                    min_level,reconst_logs,reg_logs,ff_logs,frame_logs = all_img_logs
+                    ff_loss, bu_log, td_log =  reg_logs
+                    for ts in range(FLAGS.timesteps):
+                        if ts in [0,1,4,5]:
+                            deltas, norms, sims = frame_logs[ts]
+                            for l in range(FLAGS.num_levels):
+                                if l<FLAGS.num_levels-1:
+                                    log_dict['bu_loss_l{}_t{}'.format(l+2,ts)] = bu_log[ts][l]
+                                    log_dict['td_loss_l{}_t{}'.format(l+1,ts)] = td_log[ts][l]
 
-            for ts,ts_delta,ts_norm in zip([0,1,2,3,4,5],delta_log, norms_log):
-                log_dict['delta_l1_t{}'.format(ts)] = ts_delta[0]
-                log_dict['delta_l3_t{}'.format(ts)] = ts_delta[1]
-                log_dict['delta_l5_t{}'.format(ts)] = ts_delta[2]
+                                log_dict['delta_l{}_t{}'.format(l+1,ts)] = deltas[l]
+                                log_dict['sims_l{}_t{}'.format(l+1,ts)] = sims[l]
+                                if l in [0,2,4] and ts in [0,1,FLAGS.timesteps-1]:
+                                    log_dict['level_norm_l{}_t{}'.format(l+1,ts)] = norms[l][0]
+                                    log_dict['bu_norm_l{}_t{}'.format(l+1,ts)] = norms[l][1]
+                                    if l<FLAGS.num_levels-1:
+                                        log_dict['td_norm_l{}_t{}'.format(l+1,ts)] = norms[l][2]
 
-                log_dict['bu_norm_l2_t{}'.format(ts)] = ts_norm[1][0]
-                log_dict['bu_norm_l3_t{}'.format(ts)] = ts_norm[2][0]
-                log_dict['bu_norm_l4_t{}'.format(ts)] = ts_norm[3][0]
-                log_dict['bu_norm_l5_t{}'.format(ts)] = ts_norm[4][0]
+                    for ts in range(FLAGS.ff_ts):
+                        deltas, norms, sims = ff_logs[ts]
+                        for l in range(FLAGS.num_levels):
+                            log_dict['ff_lev_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][0]
+                            log_dict['ff_bu_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][1]
+                            log_dict['ff_td_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][2]
 
-                log_dict['td_norm_l1_t{}'.format(ts)] = ts_norm[0][1]
-                log_dict['td_norm_l2_t{}'.format(ts)] = ts_norm[1][1]
-                log_dict['td_norm_l3_t{}'.format(ts)] = ts_norm[2][1]
-                log_dict['td_norm_l4_t{}'.format(ts)] = ts_norm[3][1]
+                elif all_img_logs[0] == 0:
+                    min_level, reconst_loss = all_img_logs
+                    log_dict['reconst_loss_f0'] = reconst_loss
+                    continue
+                else:
+                    min_level,reconst_logs,reg_logs,ff_logs = all_img_logs
+                    ff_loss = reg_logs[0]
 
-                log_dict['level_norm_l1_t{}'.format(ts)] = ts_norm[0][2]
-                log_dict['att_norm_l2_t{}'.format(ts)] = ts_norm[1][2]
-                log_dict['att_norm_l3_t{}'.format(ts)] = ts_norm[2][2]
-                log_dict['att_norm_l4_t{}'.format(ts)] = ts_norm[3][2]
-                log_dict['att_norm_l5_t{}'.format(ts)] = ts_norm[4][2]
+                log_dict['reconst_loss_f{}'.format(min_level)] = reconst_logs[0]
+                log_dict['ff_reconst_loss_f{}'.format(min_level)] = reconst_logs[1]
 
-            for ts_bu,ts_td in zip(bu_log, td_log):
-                log_dict['bu_loss_l2_t{}'.format(ts_bu[-1])] = ts_bu[0]
-                log_dict['bu_loss_l3_t{}'.format(ts_bu[-1])] = ts_bu[1]
-                log_dict['bu_loss_l4_t{}'.format(ts_bu[-1])] = ts_bu[2]
-                log_dict['bu_loss_l5_t{}'.format(ts_bu[-1])] = ts_bu[3]
-                log_dict['td_loss_l1_t{}'.format(ts_bu[-1])] = ts_td[0]
-                log_dict['td_loss_l2_t{}'.format(ts_bu[-1])] = ts_td[1]
-                log_dict['td_loss_l3_t{}'.format(ts_bu[-1])] = ts_td[2]
-                log_dict['td_loss_l4_t{}'.format(ts_bu[-1])] = ts_td[3]
+                for ts in range(FLAGS.ff_ts):
+                    deltas, norms, sims = ff_logs[ts]
+                    for l in range(FLAGS.num_levels):
+                        log_dict['ff_delta_l{}_f{}_t{}'.format(l+1,min_level,ts)] = deltas[l]
+                        log_dict['ff_sims_l{}_f{}_t{}'.format(l+1,min_level,ts)] = sims[l]
+
+                ff_out_norm,ff_in_norm = ff_logs[-1]
+                for l in range(FLAGS.num_levels):
+                    log_dict['ff_loss_l{}_f{}'.format(l+1,min_level)] = ff_loss[l]
+                    log_dict['ff_pred_norm_l{}_f{}'.format(l+1,min_level)] = ff_in_norm[l]
+                    log_dict['ff_final_norm_l{}_f{}'.format(l+1,min_level)] = ff_out_norm[l]
+                    
 
             wandb.log(log_dict)
 

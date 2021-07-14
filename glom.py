@@ -427,22 +427,22 @@ class GLOM(nn.Module):
         td_log = []
         ff_log = []
         if self.bank_full:
-            for t in range(FLAGS.timesteps):
+            for ts in range(FLAGS.timesteps):
                 bu_loss = []
                 td_loss = []
                 for level in range(self.num_levels):
                     sim_target = target_embds[level].detach() if FLAGS.sg_target else target_embds[level]
 
                     if level > 0:
-                        bu_loss.append(self.similarity(sim_target, self.all_bu[level][t], level))
+                        bu_loss.append(self.similarity(sim_target, self.all_bu[level][ts], level))
                     if level < self.num_levels-1:
-                        td_loss.append(self.similarity(sim_target, self.all_td[level][t], level))
+                        td_loss.append(self.similarity(sim_target, self.all_td[level][ts], level))
 
                 total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
                 total_td_loss += sum(td_loss)/max(1.,len(td_loss))
                 if log:
-                    bu_log.append((bu_loss[0],bu_loss[1],bu_loss[2],bu_loss[3],t))
-                    td_log.append((td_loss[0],td_loss[1],td_loss[2],td_loss[3],t))
+                    bu_log.append((bu_loss[0],bu_loss[1],bu_loss[2],bu_loss[3],ts))
+                    td_log.append((td_loss[0],td_loss[1],td_loss[2],td_loss[3],ts))
 
             for level in range(self.num_levels):
                 sim_target = target_embds[level].detach() if FLAGS.ff_sg_target else target_embds[level]
@@ -481,6 +481,7 @@ class GLOM(nn.Module):
                 else:
                     pred_embds.append(bottom_up)
                     contrib_sims = self.zero_tensor.reshape(1,1,1,1)
+                prev_timestep = self.zero_tensor.reshape(1,1,1,1)
             else:
                 bs,c,h,w = level_embds[level].shape
                 prev_timestep = level_embds[level]
@@ -496,7 +497,7 @@ class GLOM(nn.Module):
                     pred_embds.append((bottom_up*contrib_sims[:,:1,:,:] + prev_timestep*contrib_sims[:,1:2,:,:]) / \
                                         (contrib_sims.sum(dim=1,keepdim=True)))
 
-            level_embds[level], attention_embd = self.add_spatial_attention(pred_embds[level], level, ret_att=True)
+            level_embds[level] = self.add_spatial_attention(pred_embds[level], level)
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
             if self.bank_full:
@@ -511,10 +512,10 @@ class GLOM(nn.Module):
                 if log:
                     level_sims.append(contrib_sims.mean((0,2,3)))
                     level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
-                    if level > 0:
-                        level_norms.append((torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean(),torch.norm(attention_embd,dim=1).mean()))
+                    if level < self.num_levels-1:
+                        level_norms.append((torch.norm(level_embds[level],dim=1).mean(),torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean()))
                     else:
-                        level_norms.append((torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean(),torch.norm(level_embds[level],dim=1).mean()))
+                        level_norms.append((torch.norm(level_embds[level],dim=1).mean(),torch.norm(bottom_up,dim=1).mean()))
 
                 if ts == FLAGS.timesteps-1:
                     if FLAGS.sim_target_att:
@@ -552,7 +553,7 @@ class GLOM(nn.Module):
         return reconst_img, level_embds, pred_embds, logs
 
     
-    def forward_video(self, frames, f_log=2):
+    def forward_video(self, frames):
         total_reconst_loss = 0.
         total_ff_loss = 0.
         total_bu_loss = 0.
@@ -570,10 +571,10 @@ class GLOM(nn.Module):
 
         for f_idx,frame in enumerate(frames):
             if f_idx in frame_idxs:
-                min_level = frame_idxs.index(f_idx) + 1
-                log_frame = min_level==f_log
+                min_level = max(frame_idxs.index(f_idx),1)
+                log_frame = min_level==FLAGS.frame_log
                 if f_idx > 0:
-                    ff_reconst_img, ff_level_embds, ff_pred_embds, ff_logs = self.predict_next_frame(ff_level_embds, min_level=1)
+                    ff_reconst_img, ff_level_embds, ff_pred_embds, ff_logs = self.predict_next_frame(ff_level_embds, min_level=1, log=log_frame)
                     if FLAGS.ff_sg_target:
                         ff_level_feed = [ff_level if l_ix>=min_level-1 else None for l_ix in ff_level_embds]
                     else:
@@ -582,6 +583,8 @@ class GLOM(nn.Module):
                 reconst_img, level_embds, pred_embds, frame_logs = self.forward_single_image(frame, level_embds=ff_level_feed, log=log_frame)
                 if f_idx == 0:
                     ff_level_embds = level_embds
+                    reconst_loss = F.mse_loss(reconst_img,frame)
+                    logs.append((0,reconst_loss))
                     continue
                 
                 if FLAGS.sim_target_att:
@@ -598,9 +601,9 @@ class GLOM(nn.Module):
                 total_bu_loss += reg_losses[1]
                 total_td_loss += reg_losses[2]
                 if log_frame:
-                    logs.append((reconst_logs,reg_logs,ff_logs,frame_logs))
+                    logs.append((min_level,reconst_logs,reg_logs,ff_logs,frame_logs))
                 else:
-                    logs.append((reconst_logs,reg_logs,ff_logs))
+                    logs.append((min_level,reconst_logs,reg_logs,ff_logs))
 
                 ff_level_embds = level_embds
             else:
@@ -622,8 +625,10 @@ class GLOM(nn.Module):
         return losses, logs
 
         
-    def predict_next_frame(self, level_embds, min_level=1):
+    def predict_next_frame(self, level_embds, min_level=1, log=False):
         logs = []
+        ff_norms = []
+        final_norms = []
         pred_embds = {}
         for ts in range(FLAGS.ff_ts):
             level_deltas = []
@@ -646,6 +651,8 @@ class GLOM(nn.Module):
                         if ts == 0:
                             ff_no_norm = self.fast_forward_level(level_embds[level], level)
                             ff_embds = self.layer_normalize(ff_no_norm, level)
+                            with torch.no_grad():
+                                ff_norms.append(torch.norm(ff_embds[level],dim=1).mean())
                         else:
                             ff_embds = level_embds[level]
                         prev_timestep = ff_embds
@@ -675,17 +682,23 @@ class GLOM(nn.Module):
                             pred_embds[level] = (prev_timestep*contrib_sims[:,:1,:,:] + bottom_up*contrib_sims[:,1:2,:,:]) / \
                                                 (contrib_sims.sum(dim=1,keepdim=True))
 
-                level_embds[level], attention_embd = self.add_spatial_attention(pred_embds[level], level, ret_att=True)
+                level_embds[level] = self.add_spatial_attention(pred_embds[level], level)
 
                 with torch.no_grad():
                     level_sims.append(contrib_sims.mean((0,2,3)))
                     level_deltas.append(torch.norm(level_embds[level]-prev_timestep,dim=1).mean())
-                    if level == min_level-1:
-                        level_norms.append((torch.norm(top_down,dim=1).mean(),torch.norm(attention_embd,dim=1).mean()))
-                    else:
-                        level_norms.append((torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean(),torch.norm(attention_embd,dim=1).mean()))
+                    if log:
+                        if level == min_level-1:
+                            level_norms.append((torch.norm(level_embds[level],dim=1).mean(),0.,torch.norm(top_down,dim=1).mean()))
+                        else:
+                            level_norms.append((torch.norm(level_embds[level],dim=1).mean(),torch.norm(bottom_up,dim=1).mean(),torch.norm(top_down,dim=1).mean()))
 
-            logs.append((level_deltas,level_norms,level_sims,ts))
+                    if ts == FLAGS.ff_ts-1:
+                        final_norms.append(torch.norm(level_embds[level],dim=1).mean())
+
+            logs.append((level_deltas[::-1],level_norms[::-1],level_sims[::-1]))
+    
+        logs.append((final_norms[::-1],ff_norms[::-1]))
 
         if level_embds[0] is not None:
             reconst_img = self.reconstruct_image(level_embds[0])
