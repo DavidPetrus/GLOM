@@ -27,23 +27,22 @@ flags.DEFINE_integer('min_crop_size',24,'Minimum size of cropped region')
 flags.DEFINE_integer('max_crop_size',64,'Maximum size of cropped region')
 flags.DEFINE_float('masked_fraction',0.,'Fraction of input image that is masked')
 flags.DEFINE_bool('only_reconst',False,'')
-flags.DEFINE_integer('skip_frames',3,'')
+flags.DEFINE_integer('skip_frames',2,'')
 flags.DEFINE_integer('frame_log',1,'')
 
 # Contrastive learning flags
-flags.DEFINE_integer('num_neg_imgs',10,'')
-flags.DEFINE_integer('neg_per_ts',2,'')
+flags.DEFINE_integer('num_neg_imgs',50,'')
+flags.DEFINE_integer('neg_per_ts',4,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
-flags.DEFINE_bool('sim_target_att',False,'')
-flags.DEFINE_bool('ff_target_att',False,'')
+flags.DEFINE_bool('sim_target_att',True,'')
 flags.DEFINE_bool('sg_target',True,'')
 flags.DEFINE_bool('ff_sg_target',True,'')
-flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean')
+flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean,l2,l2_clip')
 
 # Forward Prediction flags
+flags.DEFINE_bool('pos_pred_sub_mean',False,'')
+flags.DEFINE_float('pos_temp',0.5,'')
 flags.DEFINE_bool('ff_att_mode',True,'')
-flags.DEFINE_string('ff_att_type','separate','separate,same')
-flags.DEFINE_bool('ff_reg_td_bu',False,'')
 flags.DEFINE_float('ff_width',1.,'')
 flags.DEFINE_integer('ff_ts',2,'')
 
@@ -52,19 +51,23 @@ flags.DEFINE_string('sim','none','none, sm_sim')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
 
 # Attention flags
-flags.DEFINE_float('temperature',0.3,'')
+flags.DEFINE_float('att_temp',2.,'')
+flags.DEFINE_bool('l5_uniform_att',True,'')
+flags.DEFINE_string('att_temp_mode','decrease_mult','decrease_mult,decrease_linear')
+flags.DEFINE_string('att_weight','same','exp,linear,same')
+flags.DEFINE_bool('l2_norm_att',True,'')
 flags.DEFINE_float('sim_temp',0.03,'')
-flags.DEFINE_bool('l1_att',False,'')
+flags.DEFINE_float('std_scale',1,'')
 
-flags.DEFINE_float('lr',0.0003,'Learning Rate')
-flags.DEFINE_float('reg_coeff',0.1,'Regularization coefficient used for regularization loss')
+flags.DEFINE_float('lr',0.001,'Learning Rate')
+flags.DEFINE_float('reg_coeff',0.001,'Regularization coefficient used for regularization loss')
 flags.DEFINE_bool('linear_input',True,'')
 flags.DEFINE_bool('linear_reconst',True,'')
 flags.DEFINE_bool('train_input_cnn',False,'')
 flags.DEFINE_bool('train_reconst',True,'')
 
 flags.DEFINE_integer('num_levels',5,'Number of levels in part-whole hierarchy')
-flags.DEFINE_string('granularity','8,8,8,16,32','')
+flags.DEFINE_string('granularity','4,8,8,8,16','')
 flags.DEFINE_integer('embd_mult',16,'Embedding size relative to patch size')
 
 flags.DEFINE_integer('fast_forward_layers',3,'Number of layers for Fast-Forward network')
@@ -182,7 +185,7 @@ def main(argv):
             with torch.no_grad():
                 frames = [frame.to('cuda') for frame in frames_load]
 
-                losses, logs = model.forward_video(frames)
+                losses, logs, _ = model.forward_video(frames)
 
                 reconstruction_loss,ff_loss,bu_loss,td_loss = losses
                 #final_loss = reconstruction_loss + FLAGS.reg_coeff*(ff_loss+bu_loss+td_loss)

@@ -35,6 +35,8 @@ class JHMDB_Dataset(torch.utils.data.Dataset):
             frame = torch.from_numpy(np.ascontiguousarray(frame))
             frames.append(torch.movedim(frame,2,0))
 
+        if len(frames) < 15:
+            print(video_file, len(frames))
         return frames
 
 
