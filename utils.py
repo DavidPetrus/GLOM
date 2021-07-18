@@ -45,11 +45,11 @@ def calculate_vars(log_dict, level_embds, pca):
         embds = embds.reshape(l_h*l_w,-1)
 
         fitted = pca.fit(embds)
-        log_dict['var_comp1_l{}'.format(l_ix+1)] = fitted.explained_variance_[0]
-        log_dict['var_comp2_l{}'.format(l_ix+1)] = fitted.explained_variance_[1]
-        log_dict['var_comp3_l{}'.format(l_ix+1)] = fitted.explained_variance_[2]
-        log_dict['var_comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8].sum()
-        log_dict['var_comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
+        log_dict['var/comp1_l{}'.format(l_ix+1)] = fitted.explained_variance_[0]
+        log_dict['var/comp2_l{}'.format(l_ix+1)] = fitted.explained_variance_[1]
+        log_dict['var/comp3_l{}'.format(l_ix+1)] = fitted.explained_variance_[2]
+        log_dict['var/comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8].sum()
+        log_dict['var/comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
 
     return log_dict
 
@@ -64,48 +64,57 @@ def parse_logs(log_dict,logs):
                     deltas, norms, sims = frame_logs[ts]
                     for l in range(FLAGS.num_levels):
                         if l<FLAGS.num_levels-1:
-                            log_dict['bu_loss_l{}_t{}'.format(l+2,ts)] = bu_log[ts][l]
-                            log_dict['td_loss_l{}_t{}'.format(l+1,ts)] = td_log[ts][l]
+                            log_dict['loss/bu/l{}_t{}'.format(l+2,ts)] = bu_log[ts][l]
+                            log_dict['loss/td/l{}_t{}'.format(l+1,ts)] = td_log[ts][l]
 
-                        log_dict['delta_l{}_t{}'.format(l+1,ts)] = deltas[l]
-                        log_dict['sims_l{}_t{}'.format(l+1,ts)] = sims[l]
+                        log_dict['delta/l{}_t{}'.format(l+1,ts)] = deltas[l]
+                        log_dict['sims/prev_l{}_t{}'.format(l+1,ts)] = sims[l][0]
+                        if l < FLAGS.num_levels-1:
+                            log_dict['sims/td_l{}_t{}'.format(l+1,ts)] = sims[l][1]
+
                         if l in [0,2,4] and ts in [0,1,FLAGS.timesteps-1]:
-                            log_dict['level_norm_l{}_t{}'.format(l+1,ts)] = norms[l][0]
-                            log_dict['bu_norm_l{}_t{}'.format(l+1,ts)] = norms[l][1]
+                            log_dict['norm/level/l{}_t{}'.format(l+1,ts)] = norms[l][0]
+                            log_dict['norm/bu/l{}_t{}'.format(l+1,ts)] = norms[l][1]
                             if l<FLAGS.num_levels-1:
-                                log_dict['td_norm_l{}_t{}'.format(l+1,ts)] = norms[l][2]
+                                log_dict['norm/td/l{}_t{}'.format(l+1,ts)] = norms[l][2]
 
             for ts in range(FLAGS.ff_ts):
                 deltas, norms, sims = ff_logs[ts]
                 for l in range(FLAGS.num_levels):
-                    log_dict['ff_lev_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][0]
-                    if ts>0:
-                        log_dict['ff_bu_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][1]
-                        log_dict['ff_td_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][2]
-                    else:
-                        log_dict['ff_td_norm_l{}_f{}_t{}'.format(l+1,min_level,ts)] = norms[l][1]
+                    log_dict['ff_norm/level/l{}_f{}_t{}'.format(l+1,1,ts)] = norms[l][0]
+                    if l > 0:
+                        log_dict['ff_norm/bu/l{}_f{}_t{}'.format(l+1,1,ts)] = norms[l][1]
+                    if l < FLAGS.num_levels-1:
+                        log_dict['ff_norm/td/l{}_f{}_t{}'.format(l+1,1,ts)] = norms[l][2]
 
         elif all_img_logs[0] == -1:
-            min_level, reconst_loss = all_img_logs
-            log_dict['reconst_loss_f0'] = reconst_loss
+            min_level, reconst_loss, ff_reconst_loss = all_img_logs
+            log_dict['reconst_loss/f0'] = reconst_loss
+            log_dict['reconst_loss/ff_last'] = ff_reconst_loss
             continue
         else:
             min_level,reconst_logs,reg_logs,ff_logs = all_img_logs
             ff_loss = reg_logs[0]
 
-        log_dict['reconst_loss_f{}'.format(min_level)] = reconst_logs[0]
-        log_dict['ff_reconst_loss_f{}'.format(min_level)] = reconst_logs[1]
+        log_dict['reconst_loss/f{}'.format(min_level+1)] = reconst_logs[0]
+        log_dict['reconst_loss/ff_f{}'.format(min_level+1)] = reconst_logs[1]
 
         for ts in range(FLAGS.ff_ts):
             deltas, norms, sims = ff_logs[ts]
             for l in range(FLAGS.num_levels):
-                log_dict['ff_delta_l{}_f{}_t{}'.format(l+1,min_level,ts)] = deltas[l]
-                log_dict['ff_sims_l{}_f{}_t{}'.format(l+1,min_level,ts)] = sims[l]
+                log_dict['ff_delta/l{}_f{}_t{}'.format(l+1,min_level,ts)] = deltas[l]
+                if l==0:
+                    log_dict['ff_sims/prev_l{}_f{}_t{}'.format(l+1,min_level,ts)] = sims[l][0]
+                elif l==FLAGS.num_levels-1:
+                    log_dict['ff_sims/bu_l{}_f{}_t{}'.format(l+1,min_level,ts)] = sims[l][0]
+                else:
+                    log_dict['ff_sims/bu_l{}_f{}_t{}'.format(l+1,min_level,ts)] = sims[l][0]
+                    log_dict['ff_sims/prev_l{}_f{}_t{}'.format(l+1,min_level,ts)] = sims[l][1]
 
         ff_out_norm,ff_in_norm = ff_logs[-1]
-        for l in range(FLAGS.num_levels):
-            log_dict['ff_loss_l{}_f{}'.format(l+1,min_level)] = ff_loss[l]
-            log_dict['ff_pred_norm_l{}_f{}'.format(l+1,min_level)] = ff_in_norm[l]
-            log_dict['ff_final_norm_l{}_f{}'.format(l+1,min_level)] = ff_out_norm[l]
+        for l in range(1,FLAGS.num_levels):
+            log_dict['ff_loss/l{}_f{}'.format(l+1,min_level)] = ff_loss[l]
+            log_dict['ff_in_out/in_norm_l{}_f{}'.format(l+1,min_level)] = ff_in_norm[l]
+            log_dict['ff_in_out/out_norm_l{}_f{}'.format(l+1,min_level)] = ff_out_norm[l]
 
     return log_dict

@@ -41,7 +41,7 @@ flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean,l2,l2_clip')
 
 # Forward Prediction flags
 flags.DEFINE_bool('pos_pred_sub_mean',False,'')
-flags.DEFINE_float('pos_temp',0.5,'')
+flags.DEFINE_float('pos_temp',0.3,'')
 flags.DEFINE_bool('ff_att_mode',True,'')
 flags.DEFINE_float('ff_width',1.,'')
 flags.DEFINE_integer('ff_ts',2,'')
@@ -53,9 +53,12 @@ flags.DEFINE_integer('timesteps',6,'Number of timesteps')
 # Attention flags
 flags.DEFINE_float('att_temp',2.,'')
 flags.DEFINE_bool('l5_uniform_att',True,'')
-flags.DEFINE_string('att_temp_mode','decrease_mult','decrease_mult,decrease_linear')
+flags.DEFINE_bool('l2_lower_temp',False,'')
+flags.DEFINE_string('att_temp_mode','three','decrease_mult,decrease_linear')
+flags.DEFINE_float('att_temp_scale',1.,'')
 flags.DEFINE_string('att_weight','same','exp,linear,same')
 flags.DEFINE_bool('l2_norm_att',True,'')
+flags.DEFINE_string('sim_temp_mode','three','')
 flags.DEFINE_float('sim_temp',0.03,'')
 flags.DEFINE_float('std_scale',1,'')
 
@@ -181,6 +184,11 @@ def main(argv):
                 #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0]))
 
         model.eval()
+        val_count = 0
+        val_reconstruction_loss = 0.
+        val_ff_loss = 0.
+        val_bu_loss = 0.
+        val_td_loss = 0.
         for frames_load in validation_generator:
             with torch.no_grad():
                 frames = [frame.to('cuda') for frame in frames_load]
@@ -190,9 +198,15 @@ def main(argv):
                 reconstruction_loss,ff_loss,bu_loss,td_loss = losses
                 #final_loss = reconstruction_loss + FLAGS.reg_coeff*(ff_loss+bu_loss+td_loss)
 
-                log_dict = {"Epoch":epoch,"Val Reconstruction Loss": reconstruction_loss,
-                            "Val Fast-Forward Loss":ff_loss, "Val Bottom-Up Loss": bu_loss, "Val Top-Down Loss":td_loss}
-                wandb.log(log_dict)
+                val_reconstruction_loss += reconstruction_loss
+                val_ff_loss += ff_loss
+                val_bu_loss += bu_loss
+                val_td_loss += td_loss
+                val_count += 1
+
+        log_dict = {"Epoch":epoch,"Val Reconstruction Loss": val_reconstruction_loss/val_count,
+                    "Val Fast-Forward Loss":val_ff_loss/val_count, "Val Bottom-Up Loss": val_bu_loss/val_count, "Val Top-Down Loss":val_td_loss/val_count}
+        wandb.log(log_dict)
 
         print("Epoch {}".format(epoch))
         print(log_dict)
