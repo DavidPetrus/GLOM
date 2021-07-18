@@ -3,7 +3,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from kornia.filters import filter2D
+#from kornia.filters import filter2D
 
 import scipy.spatial.distance
 import scipy.stats

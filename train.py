@@ -4,7 +4,7 @@ import torch
 import glob
 import datetime
 
-from nfnets.agc import AGC
+#from nfnets.agc import AGC
 
 from glom import GLOM
 from dataloader import JHMDB_Dataset
@@ -19,6 +19,7 @@ from absl import flags, app
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('exp','test','')
+flags.DEFINE_string('root_dir','/home/petrus/JHMDB_Dataset','')
 flags.DEFINE_integer('batch_size',1,'')
 flags.DEFINE_bool('use_agc',False,'')
 flags.DEFINE_float('clip_grad',20.,'')
@@ -94,7 +95,7 @@ def main(argv):
     #               glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
     #val_images = glob.glob("/media/petrus/Data/ADE20k/data/ADE20K_2021_17_01/images/ADE/validation/*/*/*.jpg")
 
-    all_vids = glob.glob("/home/petrus/JHMDB_dataset/JHMDB_video/ReCompress_Videos/*/*")
+    all_vids = glob.glob(FLAGS.root_dir+"/JHMDB_video/ReCompress_Videos/*/*")
     train_vids = all_vids[:800]
     validation_vids = all_vids[800:]
 
