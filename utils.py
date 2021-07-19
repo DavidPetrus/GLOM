@@ -60,13 +60,14 @@ def parse_logs(log_dict,logs):
             min_level,reconst_logs,reg_logs,ff_logs,frame_logs = all_img_logs
             ff_loss, bu_log, td_log =  reg_logs
             for ts in range(FLAGS.timesteps):
-                if ts in [0,1,4,5]:
-                    deltas, norms, sims = frame_logs[ts]
-                    for l in range(FLAGS.num_levels):
+                deltas, norms, sims = frame_logs[ts]
+                for l in range(FLAGS.num_levels):
+                    if ts in [2,3,4,5]:
                         if l<FLAGS.num_levels-1:
                             log_dict['loss/bu/l{}_t{}'.format(l+2,ts)] = bu_log[ts][l]
                             log_dict['loss/td/l{}_t{}'.format(l+1,ts)] = td_log[ts][l]
 
+                    if ts in [0,1,4,5]:
                         log_dict['delta/l{}_t{}'.format(l+1,ts)] = deltas[l]
                         log_dict['sims/prev_l{}_t{}'.format(l+1,ts)] = sims[l][0]
                         if l < FLAGS.num_levels-1:

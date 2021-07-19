@@ -42,6 +42,8 @@ class GLOM(nn.Module):
     def __init__(self, num_levels=5, embd_mult=16, granularity=[8,8,8,16,32], bottom_up_layers=3, fast_forward_layers=3, top_down_layers=3, num_input_layers=3, num_reconst=3):
         super(GLOM, self).__init__()
 
+        self.val = False
+
         self.num_levels = num_levels
         self.granularity = granularity
         self.strides = [2 if self.granularity[l]<self.granularity[l+1] else 1 for l in range(self.num_levels-1)]
@@ -68,11 +70,27 @@ class GLOM(nn.Module):
         self.num_pos_freqs = 8
         self.td_w0 = 30
         if FLAGS.att_temp_mode == 'one':
-            self.att_temp = [4.,2.,1.,0.5,0.5,0.5]
+            self.att_temp = [1.,1.,1.,1.,1.,1.]
         elif FLAGS.att_temp_mode == 'two':
-            self.att_temp = [2.,1.5,1.,0.66,0.66,0.66]
+            self.att_temp = [1.5,1.2,1.,0.8,0.7,0.7]
         elif FLAGS.att_temp_mode == 'three':
-            self.att_temp = [3.,2.,1.33,0.75,0.75,0.75]
+            self.att_temp = [1.5,1.1,0.8,0.6,0.5,0.5]
+        '''if FLAGS.att_temp_mode == 'one':
+            #self.att_temp = [4.,2.,1.,0.5,0.5,0.5]
+            self.att_temp = [2.,1.5,1.,0.5,0.5,0.5]
+        elif FLAGS.att_temp_mode == 'two':
+            #self.att_temp = [5,2.5,1.25,0.66,0.66,0.66]
+            self.att_temp = [1.,0.75,0.6,0.5,0.5,0.5]
+        elif FLAGS.att_temp_mode == 'three':
+            self.att_temp = [1.,0.75,0.6,0.5,0.4,0.3]
+        elif FLAGS.att_temp_mode == 'four':
+            self.att_temp = [0.75,0.5,0.5,0.5,0.5,0.5]
+        elif FLAGS.att_temp_mode == 'five':
+            self.att_temp = [2.,1.5,1.,0.7,0.7,0.7]
+        elif FLAGS.att_temp_mode == 'six':
+            self.att_temp = [2.,1.5,1.,0.5,0.3,0.3]
+        elif FLAGS.att_temp_mode == 'seven':
+            self.att_temp = [4.,2.,1.5,1.,0.5,0.5]'''
         self.att_temp = [temp*FLAGS.att_temp_scale for temp in self.att_temp]
 
         if FLAGS.att_weight == 'exp':
@@ -83,11 +101,13 @@ class GLOM(nn.Module):
             self.att_w = [0.,1.,1.,1.,1.]
 
         if FLAGS.sim_temp_mode == 'one':
-            self.sim_temp = [0.3,0.3,0.3,0.1,0.03,0.01]
+            self.sim_temp = [0.1,0.1,0.06,0.04,0.04,0.04]
         elif FLAGS.sim_temp_mode == 'two':
-            self.sim_temp = [1.,0.5,0.25,0.1,0.05,0.05]
+            self.sim_temp = [0.1,0.1,0.08,0.06,0.04,0.03]
         elif FLAGS.sim_temp_mode == 'three':
             self.sim_temp = [0.6,0.3,0.15,0.08,0.04,0.02]
+        elif FLAGS.sim_temp_mode == 'constant':
+            self.sim_temp = [FLAGS.sim_temp for ts in range(FLAGS.timesteps)]
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
@@ -141,7 +161,7 @@ class GLOM(nn.Module):
         self.position_encoding = []
         for l in range(self.num_levels-1):
             height_pos,width_pos = self.generate_positional_encoding(self.level_size[l][0],self.level_size[l][1])
-            self.position_encoding.append(torch.cat([height_pos.tile((1,1,1,self.level_size[l][1])),width_pos.tile((1,1,self.level_size[l][0],1))],dim=1))
+            self.position_encoding.append(torch.cat([height_pos.repeat((1,1,1,self.level_size[l][1])),width_pos.repeat((1,1,self.level_size[l][0],1))],dim=1))
 
         self.input_cnn = self.build_input_cnn()
         self.build_reconstruction_net()
@@ -281,6 +301,11 @@ class GLOM(nn.Module):
             rgb = torch.sigmoid(rgb)
             return rgb
 
+    def flush_memory_bank(self):
+        self.neg_embds = [None for l in range(self.num_levels)]
+        self.temp_neg = [[] for l in range(self.num_levels)]
+        self.bank_full = False
+
     def layer_normalize(self, level_embds, level, net=''):
         if FLAGS.layer_norm == 'out':
             level_embds = self.out_norm[level](level_embds)
@@ -372,7 +397,7 @@ class GLOM(nn.Module):
             F.pad(pos_pred_kernel[:,2,2,:,:],(2,0,2,0),value=-10000.)
             ], dim=0)[:,1:-1,1:-1] # 9,h,w
 
-        location_weights = F.softmax(pos_preds_broadcast/(FLAGS.pos_temp*(pos_preds_broadcast.max(dim=0)[0]+1e-4)),dim=0).unsqueeze(1) #9,1,h,w
+        location_weights = F.softmax(pos_preds_broadcast/(FLAGS.pos_temp*(pos_preds_broadcast.max(dim=0)[0].abs()+1e-4)),dim=0).unsqueeze(1) #9,1,h,w
 
         ff_preds_distribute = torch.cat([
             F.pad(ff_pred,(0,2,0,2)),
@@ -467,15 +492,21 @@ class GLOM(nn.Module):
         ff_log = []
         if self.bank_full:
             for ts in range(FLAGS.timesteps):
-                bu_loss = []
-                td_loss = []
-                for level in range(self.num_levels):
+                bu_loss = [0.]
+                td_loss = [0.]
+                for level in range(1,self.num_levels):
                     sim_target = target_embds[level].detach() if FLAGS.sg_target else target_embds[level]
 
-                    if level > 0:
-                        bu_loss.append(self.similarity(sim_target, self.all_bu[level][ts], level, ts=ts))
-                    if level < self.num_levels-1:
-                        td_loss.append(self.similarity(sim_target, self.all_td[level][ts], level, ts=ts))
+                    if ts >= FLAGS.ts_reg:
+                        if level > 0:
+                            bu_loss.append(self.similarity(sim_target, self.all_bu[level][ts], level, ts=ts))
+                        if level < self.num_levels-1:
+                            td_loss.append(self.similarity(sim_target, self.all_td[level][ts], level, ts=ts))
+                    else:
+                        if level > 0:
+                            bu_loss.append(0.)
+                        if level < self.num_levels-1:
+                            td_loss.append(0.)
 
                 total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
                 total_td_loss += sum(td_loss)/max(1.,len(td_loss))
@@ -483,7 +514,8 @@ class GLOM(nn.Module):
                     bu_log.append((bu_loss[0],bu_loss[1],bu_loss[2],bu_loss[3],ts))
                     td_log.append((td_loss[0],td_loss[1],td_loss[2],td_loss[3],ts))
 
-            for level in range(self.num_levels):
+            ff_log = [0.]
+            for level in range(1,self.num_levels):
                 sim_target = target_embds[level].detach() if FLAGS.ff_sg_target else target_embds[level]
                 ff_loss_lev = self.similarity(sim_target, ff_embds[level], level, ff=True)
                 ff_loss += ff_loss_lev
@@ -545,10 +577,19 @@ class GLOM(nn.Module):
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
             if self.bank_full:
-                if level > 0:
-                    self.all_bu[level].append(bottom_up)
-                if level < self.num_levels-1 and level_embds[level+1] is not None:
-                    self.all_td[level].append(top_down)
+                if ts < FLAGS.ts_reg:
+                    if level > 0:
+                        self.all_bu[level].append(None)
+                    if level < self.num_levels-1 and level_embds[level+1] is not None:
+                        self.all_td[level].append(None)
+                else:
+                    if level > 0:
+                        self.all_bu[level].append(bottom_up)
+                    if level < self.num_levels-1 and level_embds[level+1] is not None:
+                        self.all_td[level].append(top_down)
+
+            if ts == FLAGS.timesteps-1 and level==0:
+                l1_top_down = top_down
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
@@ -566,7 +607,7 @@ class GLOM(nn.Module):
                         level_norms.append((torch.norm(level_embds[level],dim=1).mean(),torch.norm(bottom_up,dim=1).mean()))
                         level_sims.append((sims[1],))
 
-                if ts == FLAGS.timesteps-1:
+                if ts == FLAGS.timesteps-1 and not self.val and level > 0:
                     if FLAGS.sim_target_att:
                         neg_sample = level_embds[level][0,:,torch.randint(0,h,(FLAGS.neg_per_ts,)),torch.randint(0,w,(FLAGS.neg_per_ts,))].detach()
                         self.temp_neg[level].append(F.normalize(neg_sample, dim=0))
@@ -574,6 +615,8 @@ class GLOM(nn.Module):
                         neg_sample = pred_embds[level][0,:,torch.randint(0,h,(FLAGS.neg_per_ts,)),torch.randint(0,w,(FLAGS.neg_per_ts,))].detach()
                         self.temp_neg[level].append(F.normalize(neg_sample, dim=0))
 
+        if ts == FLAGS.timesteps-1:
+            level_embds[0] = l1_top_down
         logs = [level_deltas, level_norms, level_sims]
         return level_embds, pred_embds, logs
 
@@ -592,8 +635,8 @@ class GLOM(nn.Module):
             embd_input = self.input_cnn(img)
 
         # Keep on updating embeddings for t timesteps
-        for t in range(FLAGS.timesteps):
-            level_embds, pred_embds, ts_logs = self.update_embeddings(level_embds, t, embd_input, log=log)
+        for ts in range(FLAGS.timesteps):
+            level_embds, pred_embds, ts_logs = self.update_embeddings(level_embds, ts, embd_input, log=log)
             if log:
                 logs.append(ts_logs)
 
@@ -612,11 +655,11 @@ class GLOM(nn.Module):
         frames = frames[frame_start:frame_start+20:FLAGS.skip_frames]
         frame_idxs = [0,1,4]
 
-        if not self.bank_full and len(self.temp_neg[0]) >= FLAGS.num_neg_imgs*FLAGS.num_neg_ts*len(frame_idxs):
+        if not self.bank_full and len(self.temp_neg[-1]) >= FLAGS.num_neg_imgs*FLAGS.num_neg_ts*len(frame_idxs):
             self.bank_full = True
 
-        if self.bank_full:
-            for level in range(self.num_levels):
+        if self.bank_full and not self.val:
+            for level in range(1,self.num_levels):
                 self.neg_embds[level] = torch.cat(self.temp_neg[level], dim=1)
                 del self.temp_neg[level][:int(len(self.temp_neg[level])/FLAGS.num_neg_imgs)]
 
@@ -702,7 +745,7 @@ class GLOM(nn.Module):
                 prev_timestep = level_embds[level]
 
                 if level == 0:
-                    contrib_sims = self.ones_tensor.tile(1,2,1,1)
+                    contrib_sims = self.ones_tensor.repeat((1,2,1,1))
                     pred_embds[level] = top_down
                 elif level < self.num_levels - 1:
                     td_prev_sim = self.attractor_sim_calc(top_down, prev_timestep)

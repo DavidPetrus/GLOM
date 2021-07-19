@@ -19,7 +19,7 @@ from absl import flags, app
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('exp','test','')
-flags.DEFINE_string('root_dir','/home/petrus/JHMDB_Dataset','')
+flags.DEFINE_string('root_dir','/home/petrus/JHMDB_dataset','')
 flags.DEFINE_integer('batch_size',1,'')
 flags.DEFINE_bool('use_agc',False,'')
 flags.DEFINE_float('clip_grad',20.,'')
@@ -32,9 +32,10 @@ flags.DEFINE_integer('skip_frames',2,'')
 flags.DEFINE_integer('frame_log',1,'')
 
 # Contrastive learning flags
-flags.DEFINE_integer('num_neg_imgs',50,'')
-flags.DEFINE_integer('neg_per_ts',4,'')
+flags.DEFINE_integer('num_neg_imgs',20,'')
+flags.DEFINE_integer('neg_per_ts',8,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
+flags.DEFINE_integer('ts_reg',2,'')
 flags.DEFINE_bool('sim_target_att',True,'')
 flags.DEFINE_bool('sg_target',True,'')
 flags.DEFINE_bool('ff_sg_target',True,'')
@@ -46,6 +47,7 @@ flags.DEFINE_float('pos_temp',0.3,'')
 flags.DEFINE_bool('ff_att_mode',True,'')
 flags.DEFINE_float('ff_width',1.,'')
 flags.DEFINE_integer('ff_ts',2,'')
+flags.DEFINE_float('ff_reg',0.,'')
 
 # Timestep update flags
 flags.DEFINE_string('sim','none','none, sm_sim')
@@ -55,11 +57,11 @@ flags.DEFINE_integer('timesteps',6,'Number of timesteps')
 flags.DEFINE_float('att_temp',2.,'')
 flags.DEFINE_bool('l5_uniform_att',True,'')
 flags.DEFINE_bool('l2_lower_temp',False,'')
-flags.DEFINE_string('att_temp_mode','three','decrease_mult,decrease_linear')
+flags.DEFINE_string('att_temp_mode','one','decrease_mult,decrease_linear')
 flags.DEFINE_float('att_temp_scale',1.,'')
 flags.DEFINE_string('att_weight','same','exp,linear,same')
 flags.DEFINE_bool('l2_norm_att',True,'')
-flags.DEFINE_string('sim_temp_mode','three','')
+flags.DEFINE_string('sim_temp_mode','constant','')
 flags.DEFINE_float('sim_temp',0.03,'')
 flags.DEFINE_float('std_scale',1,'')
 
@@ -142,6 +144,8 @@ def main(argv):
     train_iter = 0
     for epoch in range(10000):
         model.train()
+        model.val = False
+        model.flush_memory_bank()
         for frames_load in training_generator:
             # Set optimzer gradients to zero
             optimizer.zero_grad()
@@ -149,9 +153,8 @@ def main(argv):
             frames = [frame.to('cuda') for frame in frames_load]
 
             losses, logs, level_embds = model.forward_video(frames)
-
             reconstruction_loss,ff_loss,bu_loss,td_loss = losses
-            final_loss = reconstruction_loss + FLAGS.reg_coeff*(ff_loss+bu_loss+td_loss)
+            final_loss = reconstruction_loss + FLAGS.reg_coeff*(FLAGS.ff_reg*ff_loss+bu_loss+td_loss)
 
             # Calculate gradients of the weights
             final_loss.backward()
@@ -176,7 +179,7 @@ def main(argv):
                 log_dict = parse_logs(log_dict,logs)
             wandb.log(log_dict)
 
-            if train_iter > 1000 and train_iter%100==0:
+            if train_iter > 1000 and train_iter%100==0 and FLAGS.root_dir=='/home/petrus/JHMDB_dataset':
                 if final_loss < min_loss:
                     torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
                     min_loss = final_loss
@@ -185,6 +188,7 @@ def main(argv):
                 #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0]))
 
         model.eval()
+        model.val = True
         val_count = 0
         val_reconstruction_loss = 0.
         val_ff_loss = 0.
