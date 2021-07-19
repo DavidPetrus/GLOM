@@ -8,7 +8,7 @@ import datetime
 
 from glom import GLOM
 from dataloader import JHMDB_Dataset
-from utils import parse_logs, calculate_vars
+from utils import parse_logs, calculate_vars, find_clusters
 
 from sklearn.decomposition import PCA
 
@@ -104,7 +104,7 @@ def main(argv):
     print("Num train videos:",len(train_vids))
     print("Num val videos:",len(validation_vids))
 
-    pca = PCA(n_components=20)
+    #pca = PCA(n_components=20)
 
     IMAGENET_DEFAULT_MEAN = (255*0.485, 255*0.456, 255*0.406)
     IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
@@ -173,7 +173,8 @@ def main(argv):
 
             if train_iter % 100 == 0:
                 print(log_dict)
-                log_dict = calculate_vars(log_dict,level_embds,pca)
+                #log_dict = calculate_vars(log_dict,level_embds,pca)
+                log_dict = find_clusters(log_dict,level_embds)
                 
             if model.bank_full:
                 log_dict = parse_logs(log_dict,logs)

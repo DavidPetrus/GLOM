@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 import cv2
+import time
+from sklearn.cluster import AgglomerativeClustering
 
 from absl import flags
 
@@ -51,6 +53,20 @@ def calculate_vars(log_dict, level_embds, pca):
         log_dict['var/comp4_l{}'.format(l_ix+1)] = fitted.explained_variance_[3:8].sum()
         log_dict['var/comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
 
+    return log_dict
+
+def find_clusters(log_dict, level_embds):
+    start = time.time()
+    for dist_thresh in [0.05,0.1,0.2,0.3,0.5]:
+        agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,affinity='cosine',linkage='complete').fit()
+        for l_ix, embd_tensor in enumerate(level_embds):
+            embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
+            _,l_h,l_w,_ = embds.shape
+            embds = embds.reshape(l_h*l_w,-1)
+            fitted = agglom_clust.fit(embds)
+            log_dict['n_clusters/l{}_{}'.format(l_ix+1,dist_thresh)] = fitted.n_clusters_
+    
+    print('Clustering Time:',time.time()-start)
     return log_dict
 
 
