@@ -8,7 +8,7 @@ import datetime
 
 from glom import GLOM
 from dataloader import JHMDB_Dataset
-from utils import parse_logs, calculate_vars, find_clusters, plot_embeddings
+from utils import parse_logs, calculate_vars, find_clusters, plot_embeddings, parse_image_logs
 
 from sklearn.decomposition import PCA
 
@@ -32,16 +32,23 @@ flags.DEFINE_float('masked_fraction',0.,'Fraction of input image that is masked'
 flags.DEFINE_bool('only_reconst',False,'')
 flags.DEFINE_integer('skip_frames',2,'')
 flags.DEFINE_integer('frame_log',1,'')
+flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean,l2,l2_clip')
 
 # Contrastive learning flags
 flags.DEFINE_integer('num_neg_imgs',20,'')
-flags.DEFINE_integer('neg_per_ts',8,'')
+flags.DEFINE_integer('neg_per_ts',4,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
+
+flags.DEFINE_bool('bilinear',True,'')
+flags.DEFINE_bool('cl_symm',True,'')
+flags.DEFINE_bool('cl_sg',False,'')
+flags.DEFINE_integer('jitter',0,'')
+
 flags.DEFINE_integer('ts_reg',2,'')
 flags.DEFINE_bool('sim_target_att',True,'')
 flags.DEFINE_bool('sg_target',True,'')
 flags.DEFINE_bool('ff_sg_target',True,'')
-flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean,l2,l2_clip')
+
 
 # Forward Prediction flags
 flags.DEFINE_bool('pos_pred_sub_mean',False,'')
@@ -148,22 +155,25 @@ def main(argv):
             # Set optimzer gradients to zero
             optimizer.zero_grad()
 
-            frames = [frame.to('cuda') for frame in frames_load]
+            #frames = [frame.to('cuda') for frame in frames_load]
+            image = frames_load[0].to('cuda')
+            aug_img = frames_load[1].to('cuda')
+            crop_dims = frames_load[2]
 
-            losses, logs, level_embds = model.forward_video(frames)
-            reconstruction_loss,ff_loss,bu_loss,td_loss = losses
-            final_loss = reconstruction_loss + FLAGS.reg_coeff*(FLAGS.ff_reg*ff_loss+bu_loss+td_loss)
+            losses, logs, level_embds = model.forward_contrastive(image,aug_img,crop_dims)
+            reconstruction_loss, reg_loss = losses
+            final_loss = reconstruction_loss + FLAGS.reg_coeff*reg_loss
 
             # Calculate gradients of the weights
             final_loss.backward()
 
             train_iter += 1
             log_dict = {"Epoch":epoch,"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss": reconstruction_loss,
-                        "Fast-Forward Loss":ff_loss, "Bottom-Up Loss": bu_loss, "Top-Down Loss":td_loss}
+                        "Contrastive Loss":reg_loss}
 
             # Update the weights
             if FLAGS.clip_grad > 0. and not FLAGS.use_agc:
-                log_dict['ff_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.fast_forward_net.parameters(), FLAGS.clip_grad)
+                #log_dict['ff_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.fast_forward_net.parameters(), FLAGS.clip_grad)
                 log_dict['bu_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.bottom_up_net.parameters(), FLAGS.clip_grad)
                 log_dict['td_grad_norm'] = torch.nn.utils.clip_grad_norm_(model.top_down_net.parameters(), FLAGS.clip_grad)
 
@@ -175,7 +185,9 @@ def main(argv):
                 log_dict = find_clusters(log_dict,level_embds)
                 
             if model.bank_full:
-                log_dict = parse_logs(log_dict,logs)
+                #log_dict = parse_logs(log_dict,logs)
+                log_dict = parse_image_logs(log_dict,logs)
+
             wandb.log(log_dict)
 
             if train_iter > 1000 and train_iter%100==0 and FLAGS.root_dir=='/home/petrus/JHMDB_dataset':
@@ -193,26 +205,22 @@ def main(argv):
         model.val = True
         val_count = 0
         val_reconstruction_loss = 0.
-        val_ff_loss = 0.
-        val_bu_loss = 0.
-        val_td_loss = 0.
+        val_reg_loss = 0.
         for frames_load in validation_generator:
             with torch.no_grad():
                 frames = [frame.to('cuda') for frame in frames_load]
 
-                losses, logs, _ = model.forward_video(frames)
+                losses, logs, level_embds = model.forward_contrastive(image,aug_img,crop_dims)
 
-                reconstruction_loss,ff_loss,bu_loss,td_loss = losses
+                reconstruction_loss, reg_loss = losses
                 #final_loss = reconstruction_loss + FLAGS.reg_coeff*(ff_loss+bu_loss+td_loss)
 
                 val_reconstruction_loss += reconstruction_loss
-                val_ff_loss += ff_loss
-                val_bu_loss += bu_loss
-                val_td_loss += td_loss
+                val_reg_loss += reg_loss
                 val_count += 1
 
         log_dict = {"Epoch":epoch,"Val Reconstruction Loss": val_reconstruction_loss/val_count,
-                    "Val Fast-Forward Loss":val_ff_loss/val_count, "Val Bottom-Up Loss": val_bu_loss/val_count, "Val Top-Down Loss":val_td_loss/val_count}
+                    "Val Contrastive Loss":val_reg_loss/val_count}
         wandb.log(log_dict)
 
         print("Epoch {}".format(epoch))

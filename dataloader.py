@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import cv2
 
-from utils import resize_image, normalize_image, mask_random_crop
+from utils import resize_image, normalize_image, mask_random_crop, random_crop_resize
 
 from absl import flags
 
@@ -21,6 +21,8 @@ class JHMDB_Dataset(torch.utils.data.Dataset):
         return len(self.video_files)
 
   def __getitem__(self, index):
+        f_ix = np.random.randint(0,10)
+        count = 0
         # Select sample
         video_file = self.video_files[index]
         video_cap = cv2.VideoCapture(video_file)
@@ -30,14 +32,23 @@ class JHMDB_Dataset(torch.utils.data.Dataset):
             if not ret:
                 break
 
-            #frame = cv2.copyMakeBorder(frame,0,16,0,0,cv2.BORDER_CONSTANT,value=[122,122,122])
-            frame = normalize_image(frame)
-            frame = torch.from_numpy(np.ascontiguousarray(frame))
-            frames.append(torch.movedim(frame,2,0))
+            if count == f_ix:
+                #frame = cv2.copyMakeBorder(frame,0,16,0,0,cv2.BORDER_CONSTANT,value=[122,122,122])
+                cropped,dims = random_crop_resize(frame)
 
-        if len(frames) < 15:
-            print(video_file, len(frames))
-        return frames
+                frame = normalize_image(frame)
+                frame = torch.from_numpy(np.ascontiguousarray(frame))
+                #frames.append(torch.movedim(frame,2,0))
+                frame = frame.movedim(2,0)
+
+                cropped = normalize_image(cropped)
+                cropped = torch.from_numpy(np.ascontiguousarray(cropped))
+                cropped = cropped.movedim(2,0)
+                break
+
+            count += 1
+
+        return frame,cropped,dims
 
 
 class ADE20k_Dataset(torch.utils.data.Dataset):

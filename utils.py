@@ -42,6 +42,20 @@ def mask_random_crop(image):
     return image, mask.view(mask.shape[0],mask.shape[1],1)
 
 
+def random_crop_resize(image):
+    if FLAGS.bilinear:
+        size_frac = np.random.randint(5,10)
+    else:
+        size_frac = 5
+    c_h,c_w = size_frac*24,size_frac*36
+    crop_dims = [np.random.randint(0,40-size_frac*4), np.random.randint(0,30-size_frac*3)]
+    lu = (crop_dims[0]*8 + np.random.randint(-FLAGS.jitter,FLAGS.jitter+1),
+          crop_dims[1]*8 + np.random.randint(-FLAGS.jitter,FLAGS.jitter+1))
+    crop = image[lu[1]:lu[1]+c_h,lu[0]:lu[0]+c_w]
+    resized = cv2.resize(crop, (image.shape[1],image.shape[0]))
+    return resized, [crop_dims[0],crop_dims[1],size_frac*4,size_frac*3]
+
+
 def calculate_vars(log_dict, level_embds, pca):
     for l_ix, embd_tensor in enumerate(level_embds):
         embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
@@ -107,6 +121,32 @@ def plot_embeddings(level_embds):
         segs.append(seg)
 
     return segs
+
+def parse_image_logs(log_dict,logs):
+    reconst_logs,reg_logs,frame_logs = all_img_logs
+
+    for l in range(1,FLAGS.num_levels-1):
+        log_dict['cl_loss/cl/l{}'.format(l+1)] = reg_logs[l]
+
+    for ts in range(FLAGS.timesteps):
+        deltas, norms, sims = frame_logs[ts]
+        for l in range(FLAGS.num_levels):
+            if ts in [0,1,3,4]:
+                log_dict['delta/l{}_t{}'.format(l+1,ts+1)] = deltas[l]
+                log_dict['sims/prev_l{}_t{}'.format(l+1,ts+1)] = sims[l][0]
+                if l < FLAGS.num_levels-1:
+                    log_dict['sims/td_l{}_t{}'.format(l+1,ts+1)] = sims[l][1]
+
+                if l in [0,2,4] and ts in [0,1,FLAGS.timesteps-2]:
+                    log_dict['norm/level/l{}_t{}'.format(l+1,ts+1)] = norms[l][0]
+                    log_dict['norm/bu/l{}_t{}'.format(l+1,ts+1)] = norms[l][1]
+                    if l<FLAGS.num_levels-1:
+                        log_dict['norm/td/l{}_t{}'.format(l+1,ts+1)] = norms[l][2]
+
+    log_dict['reconst_loss/image'] = reconst_logs[0]
+    log_dict['reconst_loss/aug'] = reconst_logs[1]
+
+    return log_dict
 
 def parse_logs(log_dict,logs):
     for all_img_logs in logs:
