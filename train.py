@@ -8,7 +8,7 @@ import datetime
 
 from glom import GLOM
 from dataloader import JHMDB_Dataset
-from utils import parse_logs, calculate_vars, find_clusters
+from utils import parse_logs, calculate_vars, find_clusters, plot_embeddings
 
 from sklearn.decomposition import PCA
 
@@ -19,6 +19,8 @@ from absl import flags, app
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('exp','test','')
+flags.DEFINE_bool('plot',False,'')
+flags.DEFINE_float('dist_thresh',0.2,'')
 flags.DEFINE_string('root_dir','/home/petrus/JHMDB_dataset','')
 flags.DEFINE_integer('batch_size',1,'')
 flags.DEFINE_bool('use_agc',False,'')
@@ -54,19 +56,14 @@ flags.DEFINE_string('sim','none','none, sm_sim')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
 
 # Attention flags
-flags.DEFINE_float('att_temp',2.,'')
-flags.DEFINE_bool('l5_uniform_att',True,'')
-flags.DEFINE_bool('l2_lower_temp',False,'')
-flags.DEFINE_string('att_temp_mode','one','decrease_mult,decrease_linear')
-flags.DEFINE_float('att_temp_scale',1.,'')
-flags.DEFINE_string('att_weight','same','exp,linear,same')
+flags.DEFINE_string('att_temp','two','')
+flags.DEFINE_string('att_weight','four','exp,linear,same')
 flags.DEFINE_bool('l2_norm_att',True,'')
-flags.DEFINE_string('sim_temp_mode','constant','')
 flags.DEFINE_float('sim_temp',0.03,'')
 flags.DEFINE_float('std_scale',1,'')
 
-flags.DEFINE_float('lr',0.001,'Learning Rate')
-flags.DEFINE_float('reg_coeff',0.001,'Regularization coefficient used for regularization loss')
+flags.DEFINE_float('lr',0.0003,'Learning Rate')
+flags.DEFINE_float('reg_coeff',0.01,'Regularization coefficient used for regularization loss')
 flags.DEFINE_bool('linear_input',True,'')
 flags.DEFINE_bool('linear_reconst',True,'')
 flags.DEFINE_bool('train_input_cnn',False,'')
@@ -122,7 +119,8 @@ def main(argv):
 
     #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
-    #model.load_state_dict(torch.load('weights/9July6.pt'))
+    if FLAGS.plot:
+        model.load_state_dict(torch.load('weights/21July2.pt'))
 
     if FLAGS.use_agc:
         optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
@@ -187,6 +185,9 @@ def main(argv):
 
                 #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0]))
                 #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0]))
+
+            if FLAGS.plot:
+                plot_embeddings(level_embds)
 
         model.eval()
         model.val = True

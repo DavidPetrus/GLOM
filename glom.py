@@ -4,9 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 #from kornia.filters import filter2D
+import cv2
 
 import scipy.spatial.distance
 import scipy.stats
+
+from utils import display_reconst_img, plot_embeddings
 
 import warnings
 
@@ -49,7 +52,7 @@ class GLOM(nn.Module):
         self.strides = [2 if self.granularity[l]<self.granularity[l+1] else 1 for l in range(self.num_levels-1)]
         self.embd_dims = [embd_mult*patch_size for patch_size in granularity]
 
-        img_h = 256
+        img_h = 240
         img_w = 320
         l1_h = img_h//self.granularity[0]
         l1_w = img_w//self.granularity[0]
@@ -69,45 +72,36 @@ class GLOM(nn.Module):
         self.num_reconst = num_reconst
         self.num_pos_freqs = 8
         self.td_w0 = 30
-        if FLAGS.att_temp_mode == 'one':
-            self.att_temp = [1.,1.,1.,1.,1.,1.]
-        elif FLAGS.att_temp_mode == 'two':
-            self.att_temp = [1.5,1.2,1.,0.8,0.7,0.7]
-        elif FLAGS.att_temp_mode == 'three':
-            self.att_temp = [1.5,1.1,0.8,0.6,0.5,0.5]
-        '''if FLAGS.att_temp_mode == 'one':
-            #self.att_temp = [4.,2.,1.,0.5,0.5,0.5]
-            self.att_temp = [2.,1.5,1.,0.5,0.5,0.5]
-        elif FLAGS.att_temp_mode == 'two':
-            #self.att_temp = [5,2.5,1.25,0.66,0.66,0.66]
-            self.att_temp = [1.,0.75,0.6,0.5,0.5,0.5]
-        elif FLAGS.att_temp_mode == 'three':
-            self.att_temp = [1.,0.75,0.6,0.5,0.4,0.3]
-        elif FLAGS.att_temp_mode == 'four':
-            self.att_temp = [0.75,0.5,0.5,0.5,0.5,0.5]
-        elif FLAGS.att_temp_mode == 'five':
-            self.att_temp = [2.,1.5,1.,0.7,0.7,0.7]
-        elif FLAGS.att_temp_mode == 'six':
-            self.att_temp = [2.,1.5,1.,0.5,0.3,0.3]
-        elif FLAGS.att_temp_mode == 'seven':
-            self.att_temp = [4.,2.,1.5,1.,0.5,0.5]'''
-        self.att_temp = [temp*FLAGS.att_temp_scale for temp in self.att_temp]
 
-        if FLAGS.att_weight == 'exp':
-            self.att_w = [0.,0.5,1.,2.,4.]
-        elif FLAGS.att_weight == 'linear':
-            self.att_w = [0.,0.5,1.,1.5,2.]
+        if FLAGS.att_temp == 'one':
+            self.att_temp = [0.,0.3,0.4,0.6,1.]
+        elif FLAGS.att_temp == 'two':
+            self.att_temp = [0.,0.4,0.6,1,1.]
+        elif FLAGS.att_temp == 'three':
+            self.att_temp = [0.,0.5,0.7,1,1.]
+        elif FLAGS.att_temp == 'same':
+            self.att_temp = [0.,1.,1.,1.,1.]
+
+        if FLAGS.att_weight == 'one':
+            self.att_w = [0.,0.5,1.,2.,2.]
+        elif FLAGS.att_weight == 'two':
+            self.att_w = [0.,0.25,0.5,1,2.]
+        elif FLAGS.att_weight == 'three':
+            self.att_w = [0.,0.5,0.75,1.25,2.]
+        elif FLAGS.att_weight == 'four':
+            self.att_w = [0.,0.5,1,2.,4.]
         elif FLAGS.att_weight == 'same':
             self.att_w = [0.,1.,1.,1.,1.]
 
-        if FLAGS.sim_temp_mode == 'one':
-            self.sim_temp = [0.1,0.1,0.06,0.04,0.04,0.04]
-        elif FLAGS.sim_temp_mode == 'two':
-            self.sim_temp = [0.1,0.1,0.08,0.06,0.04,0.03]
-        elif FLAGS.sim_temp_mode == 'three':
-            self.sim_temp = [0.6,0.3,0.15,0.08,0.04,0.02]
-        elif FLAGS.sim_temp_mode == 'constant':
-            self.sim_temp = [FLAGS.sim_temp for ts in range(FLAGS.timesteps)]
+        '''if FLAGS.att_w_change == 'one':
+            self.att_w_ts = [[1.,1.,1.,1.,1.,1.],[0.5,1.,1.,1.,1.,1.],[0.25,0.5,1.,1.,1.,1.],[0.25,0.5,0.75,1.,1.,1.],[0.25,0.5,0.75,1.,1.,1.]]
+        elif FLAGS.att_w_change == 'two':
+            self.att_w_ts = [[1.,1.,1.,1.,1.,1.],[0.5,1.,1.,1.,1.,1.],[0.25,0.5,1.,1.,1.,1.],[0.125,0.25,0.5,1.,1.,1.],[0.125,0.25,0.5,1.,1.,1.]]
+        elif FLAGS.att_w_change == 'three':
+            self.att_w_ts = [[1.,1.,1.,1.,1.,1.],[0.25,0.5,0.75,1.,1.,1.],[0.25,0.5,0.75,1.,1.,1.],[0.25,0.5,0.75,1.,1.,1.],[0.25,0.5,0.75,1.,1.,1.]]
+        elif FLAGS.att_w_change == 'same':
+            self.att_w_ts = [[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.]]'''
+
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
@@ -434,12 +428,8 @@ class GLOM(nn.Module):
         else:
             product = values * embeddings.reshape(batch_size,embd_size,h,w,1)
         dot_prod = product.sum(1,keepdim=True)
-        if level==4 and FLAGS.l5_uniform_att:
-            weights = F.softmax(dot_prod/FLAGS.att_temp, dim=4)
-        elif level==1 and FLAGS.l2_lower_temp:
-            weights = F.softmax(dot_prod/(0.5*self.att_temp[ts]), dim=4)
-        else:
-            weights = F.softmax(dot_prod/self.att_temp[ts], dim=4)
+        weights = F.softmax(dot_prod/self.att_temp[level], dim=4)
+
         prod = values*weights
         return prod.sum(4)
 
@@ -466,10 +456,7 @@ class GLOM(nn.Module):
         neg_sims = torch.matmul(pred_embd,self.neg_embds[level]).reshape(h*w,-1)
         all_sims = torch.cat([pos_sims,neg_sims],dim=1)
 
-        if ff:
-            return F.cross_entropy(all_sims/FLAGS.sim_temp,self.sim_target[:all_sims.shape[0]])
-        else:
-            return F.cross_entropy(all_sims/self.sim_temp[ts],self.sim_target[:all_sims.shape[0]])
+        return F.cross_entropy(all_sims/FLAGS.sim_temp,self.sim_target[:all_sims.shape[0]])
 
     def attractor_sim_calc(self, attractor, embd, bu_bu=False):
         if FLAGS.sim == 'sm_sim':
@@ -492,7 +479,7 @@ class GLOM(nn.Module):
         ff_log = []
         if self.bank_full:
             for ts in range(FLAGS.timesteps):
-                bu_loss = [0.]
+                bu_loss = []
                 td_loss = [0.]
                 for level in range(1,self.num_levels):
                     sim_target = target_embds[level].detach() if FLAGS.sg_target else target_embds[level]
@@ -704,10 +691,17 @@ class GLOM(nn.Module):
 
                 ff_level_embds = level_embds
                 min_level += 1
+
+                if FLAGS.plot:
+                    segs = plot_embeddings(level_embds)
+                    display_reconst_img(reconst_img,frame,segs=segs)
             else:
                 ff_reconst_img, ff_level_embds, ff_pred_embds, ff_logs = self.predict_next_frame(ff_level_embds, min_level=1)
                 ff_reconst_loss = F.mse_loss(ff_reconst_img,frame)
                 total_reconst_loss += ff_reconst_loss
+
+                if FLAGS.plot:
+                    display_reconst_img(ff_reconst_img,frame)
 
             if f_idx == len(frames)-1:
                 logs[0].append(ff_reconst_loss)

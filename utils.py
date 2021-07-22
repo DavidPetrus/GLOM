@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import cv2
+#import matplotlib.pyplot as plt
 import time
 from sklearn.cluster import AgglomerativeClustering
 
@@ -11,6 +12,7 @@ FLAGS = flags.FLAGS
 IMAGENET_DEFAULT_MEAN = (255*0.485, 255*0.456, 255*0.406)
 IMAGENET_DEFAULT_STD = (255*0.229, 255*0.224, 255*0.225)
 
+color = np.random.randint(0,256,[5120,3],dtype=np.uint8)
 
 def resize_image(image, max_patch_size):
     height, width, _ = image.shape
@@ -55,10 +57,26 @@ def calculate_vars(log_dict, level_embds, pca):
 
     return log_dict
 
+def display_reconst_img(reconst,frame,segs=None):
+    imshow = reconst[0].detach().movedim(0,2).cpu().numpy() * 255.
+    imshow = np.clip(imshow,0,255)
+    imshow = imshow.astype(np.uint8)
+    targ = frame[0].detach().movedim(0,2).cpu().numpy() * 255.
+    targ = targ.astype(np.uint8)
+    cv2.imshow('pred',imshow)
+    cv2.imshow('target',targ)
+    if segs is not None:
+        for level,seg in enumerate(segs):
+            cv2.imshow('L{}'.format(level+1),seg)
+    key = cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    if key==27:
+        exit()
+
 def find_clusters(log_dict, level_embds):
     start = time.time()
     for dist_thresh in [0.05,0.1,0.2,0.3,0.5]:
-        agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,affinity='cosine',linkage='complete').fit()
+        agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,affinity='cosine',linkage='average')
         for l_ix, embd_tensor in enumerate(level_embds):
             embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
             _,l_h,l_w,_ = embds.shape
@@ -69,6 +87,26 @@ def find_clusters(log_dict, level_embds):
     print('Clustering Time:',time.time()-start)
     return log_dict
 
+def plot_embeddings(level_embds):
+    global color
+
+    resize = [4,8,8,8,16]
+    segs = []
+    agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=FLAGS.dist_thresh)#,affinity='cosine',linkage='complete')
+    for l_ix, embd_tensor in enumerate(level_embds):
+        embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
+        _,l_h,l_w,_ = embds.shape
+        embds = embds.reshape(l_h*l_w,-1)
+        fitted = agglom_clust.fit(embds)
+        #clusters = np.moveaxis(fitted.labels_.reshape(l_h,l_w),0,1)
+        clusters = fitted.labels_.reshape(l_h,l_w)
+        seg = np.zeros([clusters.shape[0],clusters.shape[1],3],dtype=np.uint8)
+        for c in range(clusters.max()+1):
+            seg[clusters==c] = color[c]
+        seg = cv2.resize(seg, (seg.shape[1]*resize[l_ix],seg.shape[0]*resize[l_ix]))
+        segs.append(seg)
+
+    return segs
 
 def parse_logs(log_dict,logs):
     for all_img_logs in logs:

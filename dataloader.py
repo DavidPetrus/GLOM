@@ -30,7 +30,7 @@ class JHMDB_Dataset(torch.utils.data.Dataset):
             if not ret:
                 break
 
-            frame = cv2.copyMakeBorder(frame,0,16,0,0,cv2.BORDER_CONSTANT,value=[122,122,122])
+            #frame = cv2.copyMakeBorder(frame,0,16,0,0,cv2.BORDER_CONSTANT,value=[122,122,122])
             frame = normalize_image(frame)
             frame = torch.from_numpy(np.ascontiguousarray(frame))
             frames.append(torch.movedim(frame,2,0))
