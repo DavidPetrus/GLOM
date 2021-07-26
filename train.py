@@ -20,7 +20,7 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('exp','test','')
 flags.DEFINE_bool('plot',False,'')
-flags.DEFINE_float('dist_thresh',0.2,'')
+flags.DEFINE_float('dist_thresh',0.1,'')
 flags.DEFINE_string('root_dir','/home/petrus/JHMDB_dataset','')
 flags.DEFINE_integer('batch_size',1,'')
 flags.DEFINE_bool('use_agc',False,'')
@@ -35,20 +35,21 @@ flags.DEFINE_integer('frame_log',1,'')
 flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean,l2,l2_clip')
 
 # Contrastive learning flags
-flags.DEFINE_integer('num_neg_imgs',20,'')
+flags.DEFINE_integer('num_neg_imgs',70,'')
 flags.DEFINE_integer('neg_per_ts',4,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
 
-flags.DEFINE_bool('bilinear',True,'')
-flags.DEFINE_bool('cl_symm',True,'')
-flags.DEFINE_bool('cl_sg',False,'')
+flags.DEFINE_bool('cl_symm',False,'')
+flags.DEFINE_bool('cl_sg',True,'')
 flags.DEFINE_integer('jitter',0,'')
 
+flags.DEFINE_bool('td_bu_reg_own',False,'')
+flags.DEFINE_bool('td_bu_reg_aug',False,'')
 flags.DEFINE_integer('ts_reg',2,'')
-flags.DEFINE_bool('sim_target_att',True,'')
 flags.DEFINE_bool('sg_target',True,'')
-flags.DEFINE_bool('ff_sg_target',True,'')
 
+flags.DEFINE_bool('sim_target_att',True,'')
+flags.DEFINE_bool('ff_sg_target',True,'')
 
 # Forward Prediction flags
 flags.DEFINE_bool('pos_pred_sub_mean',False,'')
@@ -61,16 +62,20 @@ flags.DEFINE_float('ff_reg',0.,'')
 # Timestep update flags
 flags.DEFINE_string('sim','none','none, sm_sim')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
+flags.DEFINE_float('prev_weight',3.,'')
+flags.DEFINE_string('weighting','one','')
 
 # Attention flags
 flags.DEFINE_string('att_temp','two','')
 flags.DEFINE_string('att_weight','four','exp,linear,same')
 flags.DEFINE_bool('l2_norm_att',True,'')
-flags.DEFINE_float('sim_temp',0.03,'')
+flags.DEFINE_float('cl_temp',0.01,'')
+flags.DEFINE_float('reg_temp',0.03,'')
 flags.DEFINE_float('std_scale',1,'')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
-flags.DEFINE_float('reg_coeff',0.01,'Regularization coefficient used for regularization loss')
+flags.DEFINE_float('reg_coeff',0.1,'Coefficient used for regularization loss')
+flags.DEFINE_float('cl_coeff',1.,'Coefficient used for contrastive loss')
 flags.DEFINE_bool('linear_input',True,'')
 flags.DEFINE_bool('linear_reconst',True,'')
 flags.DEFINE_bool('train_input_cnn',False,'')
@@ -127,7 +132,7 @@ def main(argv):
     #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
     if FLAGS.plot:
-        model.load_state_dict(torch.load('weights/21July2.pt'))
+        model.load_state_dict(torch.load('weights/25Julie11.pt'))
 
     if FLAGS.use_agc:
         optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
@@ -150,7 +155,7 @@ def main(argv):
     for epoch in range(10000):
         model.train()
         model.val = False
-        model.flush_memory_bank()
+        #model.flush_memory_bank()
         for frames_load in training_generator:
             # Set optimzer gradients to zero
             optimizer.zero_grad()
@@ -161,15 +166,16 @@ def main(argv):
             crop_dims = frames_load[2]
 
             losses, logs, level_embds = model.forward_contrastive(image,aug_img,crop_dims)
-            reconstruction_loss, reg_loss = losses
-            final_loss = reconstruction_loss + FLAGS.reg_coeff*reg_loss
+            reconstruction_loss, cl_loss, reg_loss = losses
+            bu_loss,td_loss = reg_loss
+            final_loss = 300*reconstruction_loss + FLAGS.reg_coeff*(bu_loss + td_loss) + FLAGS.cl_coeff*cl_loss
 
             # Calculate gradients of the weights
             final_loss.backward()
 
             train_iter += 1
             log_dict = {"Epoch":epoch,"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss": reconstruction_loss,
-                        "Contrastive Loss":reg_loss}
+                        "Contrastive Loss":cl_loss, "Bottom-Up Loss":bu_loss, "Top-Down Loss:":td_loss}
 
             # Update the weights
             if FLAGS.clip_grad > 0. and not FLAGS.use_agc:
@@ -198,29 +204,32 @@ def main(argv):
                 #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0]))
                 #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0]))
 
-            if FLAGS.plot:
-                plot_embeddings(level_embds)
-
         model.eval()
         model.val = True
         val_count = 0
         val_reconstruction_loss = 0.
-        val_reg_loss = 0.
+        val_cl_loss = 0.
+        val_bu_loss = 0.
+        val_td_loss = 0.
         for frames_load in validation_generator:
             with torch.no_grad():
-                frames = [frame.to('cuda') for frame in frames_load]
+                image = frames_load[0].to('cuda')
+                aug_img = frames_load[1].to('cuda')
+                crop_dims = frames_load[2]
 
                 losses, logs, level_embds = model.forward_contrastive(image,aug_img,crop_dims)
-
-                reconstruction_loss, reg_loss = losses
+                reconstruction_loss, cl_loss, reg_loss = losses
+                bu_loss,td_loss = reg_loss
                 #final_loss = reconstruction_loss + FLAGS.reg_coeff*(ff_loss+bu_loss+td_loss)
 
                 val_reconstruction_loss += reconstruction_loss
-                val_reg_loss += reg_loss
+                val_cl_loss += cl_loss
+                val_bu_loss += bu_loss
+                val_td_loss += td_loss
                 val_count += 1
 
         log_dict = {"Epoch":epoch,"Val Reconstruction Loss": val_reconstruction_loss/val_count,
-                    "Val Contrastive Loss":val_reg_loss/val_count}
+                    "Val Contrastive Loss":val_cl_loss/val_count, "Val Bottom-Up Loss":val_bu_loss/val_count, "Val Top-Down Loss":val_td_loss/val_count}
         wandb.log(log_dict)
 
         print("Epoch {}".format(epoch))

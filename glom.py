@@ -102,6 +102,18 @@ class GLOM(nn.Module):
         elif FLAGS.att_w_change == 'same':
             self.att_w_ts = [[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.]]'''
 
+        self.bu_l1 = [1.,0.75,0.5,0.25,0.,0.]
+        self.td_l1 = [0.,0.25,0.75,1.,1.,1.]
+
+        if FLAGS.weighting == 'one':
+            self.bu_w = [1.,1.,1.,1.,1.,1.]
+            self.td_w = [0.,0.25,0.5,0.75,1.,1.]
+        elif FLAGS.weighting == 'two':
+            self.bu_w = [1.,1.,1.,1.,1.,1.]
+            self.td_w = [0.,0.5,1.,1.,1.,1.]
+        elif FLAGS.weighting == 'four':
+            self.bu_w = [1.,0.75,0.5,0.5,0.5,0.5]
+            self.td_w = [0.,0.25,0.5,0.75,1.,1.]
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
@@ -155,7 +167,7 @@ class GLOM(nn.Module):
         self.position_encoding = []
         for l in range(self.num_levels-1):
             height_pos,width_pos = self.generate_positional_encoding(self.level_size[l][0],self.level_size[l][1])
-            self.position_encoding.append(torch.cat([height_pos.repeat((1,1,1,self.level_size[l][1])),width_pos.repeat((1,1,self.level_size[l][0],1))],dim=1))
+            self.position_encoding.append(torch.cat([width_pos.repeat((1,1,self.level_size[l][0],1)),height_pos.repeat((1,1,1,self.level_size[l][1]))],dim=1))
 
         self.input_cnn = self.build_input_cnn()
         self.build_reconstruction_net()
@@ -445,7 +457,7 @@ class GLOM(nn.Module):
         else:
             return level_embd
 
-    def similarity(self, level_embds, pred_embd, level, ts=-1, ff=False):
+    def similarity(self, level_embds, pred_embd, level, ts=-1, temp=None):
         bs,c,h,w = level_embds.shape
 
         pred_embd = F.normalize(pred_embd, dim=1)
@@ -456,7 +468,7 @@ class GLOM(nn.Module):
         neg_sims = torch.matmul(pred_embd,self.neg_embds[level]).reshape(h*w,-1)
         all_sims = torch.cat([pos_sims,neg_sims],dim=1)
 
-        return F.cross_entropy(all_sims/FLAGS.sim_temp,self.sim_target[:all_sims.shape[0]])
+        return F.cross_entropy(all_sims/temp,self.sim_target[:all_sims.shape[0]])
 
     def attractor_sim_calc(self, attractor, embd, bu_bu=False):
         if FLAGS.sim == 'sm_sim':
@@ -470,71 +482,56 @@ class GLOM(nn.Module):
 
         return sim
 
-    def calculate_reg_losses(self, target_embds, ff_embds=None, log=False):
+    def crop_and_resize(self, level_embds, dims, target_size):
+        resized_embds = {}
+        for level in range(1,self.num_levels-1):
+            cropped = level_embds[level][:,:,dims[1]:dims[1]+dims[3],dims[0]:dims[0]+dims[2]]
+            resized_embds[level] = F.interpolate(cropped,size=target_size,mode='bilinear',align_corners=True)
+
+        return resized_embds
+
+    def calculate_reg_losses(self, target_embds):
         total_bu_loss = 0.
         total_td_loss = 0.
-        ff_loss = 0.
         bu_log = []
         td_log = []
-        ff_log = []
         if self.bank_full:
-            for ts in range(FLAGS.timesteps):
+            for ts in range(FLAGS.ts_reg,FLAGS.timesteps):
                 bu_loss = []
-                td_loss = [0.]
-                for level in range(1,self.num_levels):
+                td_loss = []
+                for level in range(1,self.num_levels-1):
                     sim_target = target_embds[level].detach() if FLAGS.sg_target else target_embds[level]
-
-                    if ts >= FLAGS.ts_reg:
-                        if level > 0:
-                            bu_loss.append(self.similarity(sim_target, self.all_bu[level][ts], level, ts=ts))
-                        if level < self.num_levels-1:
-                            td_loss.append(self.similarity(sim_target, self.all_td[level][ts], level, ts=ts))
-                    else:
-                        if level > 0:
-                            bu_loss.append(0.)
-                        if level < self.num_levels-1:
-                            td_loss.append(0.)
+                    if level > 0:
+                        bu_loss.append(self.similarity(sim_target, self.all_bu[level][ts], level, ts=ts, temp=FLAGS.reg_temp))
+                    if level < self.num_levels-1:
+                        td_loss.append(self.similarity(sim_target, self.all_td[level][ts], level, ts=ts, temp=FLAGS.reg_temp))
 
                 total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
                 total_td_loss += sum(td_loss)/max(1.,len(td_loss))
-                if log:
-                    bu_log.append((bu_loss[0],bu_loss[1],bu_loss[2],bu_loss[3],ts))
-                    td_log.append((td_loss[0],td_loss[1],td_loss[2],td_loss[3],ts))
+                bu_log.append((bu_loss[0],bu_loss[1],bu_loss[2],ts))
+                td_log.append((td_loss[0],td_loss[1],td_loss[2],ts))
 
-            if ff_embds is not None:
-                ff_log = [0.]
-                for level in range(1,self.num_levels):
-                    sim_target = target_embds[level].detach() if FLAGS.ff_sg_target else target_embds[level]
-                    ff_loss_lev = self.similarity(sim_target, ff_embds[level], level, ff=True)
-                    ff_loss += ff_loss_lev
-                    ff_log.append(ff_loss_lev)
-
-        losses = [ff_loss, total_bu_loss, total_td_loss]
-        if log:
-            logs = [ff_log, bu_log, td_log]
-        else:
-            logs = [ff_log]
+        losses = [total_bu_loss, total_td_loss]
+        logs = [bu_log, td_log]
 
         return losses, logs
 
-    def contrastive_loss(self, target_embds, level_embds, dims):
+    def contrastive_loss(self, aug_embds, target_embds):
         c_loss = [0.]
         for level in range(1,self.num_levels-1):
             if self.bank_full:
-                if FLAGS.bilinear:
-                    target = F.interpolate(target_embds[level],size=(dims[3],dims[2]),mode='bilinear')
-                    preds = level_embds[level][:,:,dims[1]:dims[1]+dims[3],dims[0]:dims[0]+dims[2]]
-                else:
-                    preds = target_embds[level]
-                    crop_embds = level_embds[level][:,:,dims[1]:dims[1]+dims[3],dims[0]:dims[0]+dims[2]]
-                    target = torch.repeat_interleave(torch.repeat_interleave(crop_embds,2,dim=2),2,dim=3)
-                if FLAGS.cl_sg:
-                    target = target.detach()
-
+                target = target_embds[level]
                 if FLAGS.cl_symm:
-                    loss = 0.5*self.similarity(target, preds, level) + 0.5*self.similarity(preds, target, level)
+                    if FLAGS.cl_sg:
+                        loss = 0.5*self.similarity(target.detach(), aug_embds[level], level, temp=FLAGS.cl_temp) + \
+                               0.5*self.similarity(aug_embds[level].detach(), target, level, temp=FLAGS.cl_temp)
+                    else:
+                        loss = 0.5*self.similarity(target, aug_embds[level], level, temp=FLAGS.cl_temp) + \
+                               0.5*self.similarity(aug_embds[level], target, level, temp=FLAGS.cl_temp)
                 else:
-                    loss = self.similarity(target, preds, level)
+                    if FLAGS.cl_sg:
+                        target = target.detach()
+                    loss = self.similarity(target, aug_embds[level], level, temp=FLAGS.cl_temp)
 
                 c_loss.append(loss)
             else:
@@ -562,8 +559,14 @@ class GLOM(nn.Module):
                 if level < self.num_levels-1 and level_embds[level+1] is not None:
                     bu_td_sim = self.attractor_sim_calc(bottom_up, top_down)
                     contrib_sims = torch.cat([self.ones_tensor[:,:,:h,:w],bu_td_sim],dim=1)
-                    pred_embds.append((bottom_up*contrib_sims[:,:1,:,:] + top_down*contrib_sims[:,1:2,:,:]) / \
-                                        (contrib_sims.sum(dim=1,keepdim=True)))
+                    #pred_embds.append((bottom_up*contrib_sims[:,:1,:,:] + top_down*contrib_sims[:,1:2,:,:]) / \
+                    #                    (contrib_sims.sum(dim=1,keepdim=True)))
+                    if level == 0:
+                        pred_embds.append((bottom_up*self.bu_l1[ts] + top_down*self.td_l1[ts]) / \
+                                            (self.bu_l1[ts]+self.td_l1[ts]))
+                    else:
+                        pred_embds.append((bottom_up*self.bu_w[ts] + top_down*self.td_w[ts]) / \
+                                            (self.bu_w[ts]+self.td_w[ts]))
                 else:
                     pred_embds.append(bottom_up)
                     contrib_sims = self.zero_tensor
@@ -575,32 +578,26 @@ class GLOM(nn.Module):
                 if level == 0:
                     bu_td_sim = self.attractor_sim_calc(bottom_up, top_down)
                     contrib_sims = torch.cat([self.ones_tensor[:,:,:h,:w],bu_td_sim],dim=1)
-                    pred_embds.append((bottom_up*contrib_sims[:,:1,:,:] + top_down*contrib_sims[:,1:2,:,:]) / \
-                                        (contrib_sims.sum(dim=1,keepdim=True)))
+                    pred_embds.append((bottom_up*self.bu_l1[ts] + top_down*self.td_l1[ts]) / \
+                                            (self.bu_l1[ts]+self.td_l1[ts]))
                 elif 0 < level < self.num_levels - 1:
                     bu_td_sim = self.attractor_sim_calc(bottom_up, top_down)
                     contrib_sims = torch.cat([self.ones_tensor[:,:,:h,:w],bu_prev_sim,bu_td_sim],dim=1)
-                    pred_embds.append((bottom_up*contrib_sims[:,:1,:,:] + prev_timestep*contrib_sims[:,1:2,:,:] + top_down*contrib_sims[:,2:3,:,:]) / \
-                                        (contrib_sims.sum(dim=1,keepdim=True)))
+                    pred_embds.append((bottom_up*self.bu_w[ts] + top_down*self.td_w[ts] + prev_timestep*FLAGS.prev_weight) / \
+                                            (self.bu_w[ts]+self.td_w[ts]+FLAGS.prev_weight))
                 else:
                     contrib_sims = torch.cat([self.ones_tensor[:,:,:h,:w],bu_prev_sim],dim=1)
-                    pred_embds.append((bottom_up*contrib_sims[:,:1,:,:] + prev_timestep*contrib_sims[:,1:2,:,:]) / \
-                                        (contrib_sims.sum(dim=1,keepdim=True)))
+                    pred_embds.append((bottom_up + prev_timestep*FLAGS.prev_weight) / \
+                                            (1.+FLAGS.prev_weight))
 
             level_embds[level] = self.add_spatial_attention(pred_embds[level], level, ts=ts)
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            '''if self.bank_full:
-                if ts < FLAGS.ts_reg:
-                    if level > 0:
-                        self.all_bu[level].append(None)
-                    if level < self.num_levels-1 and level_embds[level+1] is not None:
-                        self.all_td[level].append(None)
-                else:
-                    if level > 0:
-                        self.all_bu[level].append(bottom_up)
-                    if level < self.num_levels-1 and level_embds[level+1] is not None:
-                        self.all_td[level].append(top_down)'''
+            if self.bank_full and (FLAGS.td_bu_reg_own or FLAGS.td_bu_reg_aug):
+                if level > 0:
+                    self.all_bu[level][ts] = bottom_up
+                if level < self.num_levels-1 and level_embds[level+1] is not None:
+                    self.all_td[level][ts] = top_down
 
             if ts == FLAGS.timesteps-1 and level==0:
                 l1_top_down = top_down
@@ -622,7 +619,7 @@ class GLOM(nn.Module):
                             level_norms.append((torch.norm(level_embds[level],dim=1).mean(),torch.norm(bottom_up,dim=1).mean()))
                             level_sims.append((sims[1],))
 
-                    if ts == FLAGS.timesteps-1 and not self.val and level > 0:
+                    if ts == FLAGS.timesteps-1 and level > 0:# and not self.val:
                         neg_sample = level_embds[level][0,:,torch.randint(0,h,(FLAGS.neg_per_ts,)),torch.randint(0,w,(FLAGS.neg_per_ts,))].detach()
                         self.temp_neg[level].append(F.normalize(neg_sample, dim=0))
 
@@ -633,8 +630,8 @@ class GLOM(nn.Module):
 
 
     def forward_single_image(self, img, level_embds=None, log=False):
-        self.all_bu = {0: [], 1: [], 2: [], 3: [], 4: []}
-        self.all_td = {0: [], 1: [], 2: [], 3: [], 4: []}
+        self.all_bu = {0: {}, 1: {}, 2: {}, 3: {}, 4: {}}
+        self.all_td = {0: {}, 1: {}, 2: {}, 3: {}, 4: {}}
         batch_size,chans,h,w = img.shape
         logs = []
 
@@ -656,17 +653,42 @@ class GLOM(nn.Module):
         return reconst_img, level_embds, pred_embds, logs
 
     def forward_contrastive(self, image, aug_img, dims):
-        reconst_img, level_embds, _, frame_logs = self.forward_single_image(image, log=True)
-        aug_reconst, aug_embds, _,_ = self.forward_single_image(aug_img, log=True)
+        if not self.bank_full and len(self.temp_neg[-1]) >= FLAGS.num_neg_imgs*FLAGS.num_neg_ts*2:
+            self.bank_full = True
 
-        reg_loss, reg_logs = self.contrastive_loss(aug_embds,level_embds,dims)
+        if self.bank_full:
+            for level in range(1,self.num_levels):
+                self.neg_embds[level] = torch.cat(self.temp_neg[level], dim=1)
+                del self.temp_neg[level][:int(len(self.temp_neg[level])/FLAGS.num_neg_imgs)]
+
+        reconst_img, level_embds,_, frame_logs = self.forward_single_image(image, log=True)
+        aug_reconst, aug_embds,_,_ = self.forward_single_image(aug_img, log=True)
+
+        if FLAGS.plot:
+            segs = plot_embeddings(level_embds)
+            display_reconst_img(reconst_img,image,segs=segs)
+
+            segs = plot_embeddings(aug_embds)
+            display_reconst_img(aug_reconst,aug_img,segs=segs)
+
+        target_embds = self.crop_and_resize(level_embds,dims,(aug_embds[2].shape[2],aug_embds[2].shape[3]))
+
+        if FLAGS.td_bu_reg_own:
+            reg_losses, reg_logs = self.calculate_reg_losses(aug_embds)
+        elif FLAGS.td_bu_reg_aug:
+            reg_losses, reg_logs = self.calculate_reg_losses(target_embds)
+        else:
+            reg_losses = [0.,0.]
+            reg_logs = [[],[]]
+
+        cl_loss, cl_logs = self.contrastive_loss(aug_embds,target_embds)
         
         img_reconst_loss = F.mse_loss(reconst_img, image)
         aug_reconst_loss = F.mse_loss(aug_reconst, aug_img)
         reconst_loss = img_reconst_loss + aug_reconst_loss
         reconst_logs = [img_reconst_loss, aug_reconst_loss]
 
-        return [reconst_loss, reg_loss], [reconst_logs,reg_logs,frame_logs], level_embds
+        return [reconst_loss, cl_loss, reg_losses], [reconst_logs,cl_logs,reg_logs,frame_logs], level_embds
 
 
     def forward_video(self, frames):

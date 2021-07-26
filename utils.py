@@ -43,10 +43,8 @@ def mask_random_crop(image):
 
 
 def random_crop_resize(image):
-    if FLAGS.bilinear:
-        size_frac = np.random.randint(5,10)
-    else:
-        size_frac = 5
+    size_frac = np.random.randint(5,10)
+
     c_h,c_w = size_frac*24,size_frac*36
     crop_dims = [np.random.randint(0,40-size_frac*4), np.random.randint(0,30-size_frac*3)]
     lu = (crop_dims[0]*8 + np.random.randint(-FLAGS.jitter,FLAGS.jitter+1),
@@ -106,7 +104,7 @@ def plot_embeddings(level_embds):
 
     resize = [4,8,8,8,16]
     segs = []
-    agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=FLAGS.dist_thresh)#,affinity='cosine',linkage='complete')
+    agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=FLAGS.dist_thresh,affinity='cosine',linkage='average')
     for l_ix, embd_tensor in enumerate(level_embds):
         embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
         _,l_h,l_w,_ = embds.shape
@@ -123,12 +121,24 @@ def plot_embeddings(level_embds):
     return segs
 
 def parse_image_logs(log_dict,logs):
-    reconst_logs,reg_logs,frame_logs = all_img_logs
+    reconst_logs,cl_logs,reg_logs,frame_logs = logs
+
+    bu_logs,td_logs = reg_logs
+    for bu_ts,td_ts in zip(bu_logs,td_logs):
+        ts = bu_ts[-1]
+        if ts in [2,3,4,5]:
+            log_dict['loss/bu/l2_t{}'.format(ts)] = bu_ts[0]
+            log_dict['loss/bu/l3_t{}'.format(ts)] = bu_ts[1]
+            log_dict['loss/bu/l4_t{}'.format(ts)] = bu_ts[2]
+            
+            log_dict['loss/td/l2_t{}'.format(ts)] = td_ts[0]
+            log_dict['loss/td/l3_t{}'.format(ts)] = td_ts[1]
+            log_dict['loss/td/l4_t{}'.format(ts)] = td_ts[2]
 
     for l in range(1,FLAGS.num_levels-1):
-        log_dict['cl_loss/cl/l{}'.format(l+1)] = reg_logs[l]
+        log_dict['cl_loss/cl/l{}'.format(l+1)] = cl_logs[l]
 
-    for ts in range(FLAGS.timesteps):
+    for ts in range(1,FLAGS.timesteps):
         deltas, norms, sims = frame_logs[ts]
         for l in range(FLAGS.num_levels):
             if ts in [0,1,3,4]:
