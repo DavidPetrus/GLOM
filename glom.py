@@ -115,6 +115,13 @@ class GLOM(nn.Module):
             self.bu_w = [1.,0.75,0.5,0.5,0.5,0.5]
             self.td_w = [0.,0.25,0.5,0.75,1.,1.]
 
+        if FLAGS.reg_temp_mode == 'same':
+            self.reg_temp = [FLAGS.reg_temp for ts in range(FLAGS.timesteps)]
+        elif FLAGS.reg_temp_mode == 'one':
+            self.reg_temp = [None,None,0.03,0.02,0.013,0.01]
+        elif FLAGS.reg_temp_mode == 'two':
+            self.reg_temp = [None,None,0.04,0.02,0.01,0.006]
+
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
         self.num_samples = [None,12,20,20,20]

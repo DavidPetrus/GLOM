@@ -44,7 +44,7 @@ flags.DEFINE_bool('cl_sg',True,'')
 flags.DEFINE_integer('jitter',0,'')
 
 flags.DEFINE_bool('td_bu_reg_own',False,'')
-flags.DEFINE_bool('td_bu_reg_aug',False,'')
+flags.DEFINE_bool('td_bu_reg_aug',True,'')
 flags.DEFINE_integer('ts_reg',2,'')
 flags.DEFINE_bool('sg_target',True,'')
 
@@ -62,7 +62,7 @@ flags.DEFINE_float('ff_reg',0.,'')
 # Timestep update flags
 flags.DEFINE_string('sim','none','none, sm_sim')
 flags.DEFINE_integer('timesteps',6,'Number of timesteps')
-flags.DEFINE_float('prev_weight',3.,'')
+flags.DEFINE_float('prev_weight',2.,'')
 flags.DEFINE_string('weighting','one','')
 
 # Attention flags
@@ -71,6 +71,7 @@ flags.DEFINE_string('att_weight','four','exp,linear,same')
 flags.DEFINE_bool('l2_norm_att',True,'')
 flags.DEFINE_float('cl_temp',0.01,'')
 flags.DEFINE_float('reg_temp',0.03,'')
+flags.DEFINE_string('reg_temp_mode','same','')
 flags.DEFINE_float('std_scale',1,'')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
