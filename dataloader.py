@@ -33,7 +33,6 @@ class JHMDB_Dataset(torch.utils.data.Dataset):
                 break
 
             if count == f_ix:
-                #frame = cv2.copyMakeBorder(frame,0,16,0,0,cv2.BORDER_CONSTANT,value=[122,122,122])
                 cropped,dims = random_crop_resize(frame)
 
                 frame = normalize_image(frame)

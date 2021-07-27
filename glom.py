@@ -74,13 +74,15 @@ class GLOM(nn.Module):
         self.td_w0 = 30
 
         if FLAGS.att_temp == 'one':
-            self.att_temp = [0.,0.3,0.4,0.6,1.]
+            self.att_temp = [0.,0.1,0.2,0.3,1.]
         elif FLAGS.att_temp == 'two':
-            self.att_temp = [0.,0.4,0.6,1,1.]
+            self.att_temp = [0.,0.1,0.3,0.5,1.]
+            #self.att_temp = [0.,0.4,0.6,1,1.]
         elif FLAGS.att_temp == 'three':
-            self.att_temp = [0.,0.5,0.7,1,1.]
+            self.att_temp = [0.,0.2,0.3,0.4,1.]
         elif FLAGS.att_temp == 'same':
-            self.att_temp = [0.,1.,1.,1.,1.]
+            #self.att_temp = [0.,1.,1.,1.,1.]
+            self.att_temp = [0.] + [FLAGS.att_t for l in range(self.num_levels-1)]
 
         if FLAGS.att_weight == 'one':
             self.att_w = [0.,0.5,1.,2.,2.]
@@ -91,7 +93,8 @@ class GLOM(nn.Module):
         elif FLAGS.att_weight == 'four':
             self.att_w = [0.,0.5,1,2.,4.]
         elif FLAGS.att_weight == 'same':
-            self.att_w = [0.,1.,1.,1.,1.]
+            #self.att_w = [0.,1.,1.,1.,1.]
+            self.att_w = [0.] + [FLAGS.att_w for l in range(self.num_levels-1)]
 
         '''if FLAGS.att_w_change == 'one':
             self.att_w_ts = [[1.,1.,1.,1.,1.,1.],[0.5,1.,1.,1.,1.,1.],[0.25,0.5,1.,1.,1.,1.],[0.25,0.5,0.75,1.,1.,1.],[0.25,0.5,0.75,1.,1.,1.]]
@@ -102,12 +105,13 @@ class GLOM(nn.Module):
         elif FLAGS.att_w_change == 'same':
             self.att_w_ts = [[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.],[1.,1.,1.,1.,1.,1.]]'''
 
-        self.bu_l1 = [1.,0.75,0.5,0.25,0.,0.]
-        self.td_l1 = [0.,0.25,0.75,1.,1.,1.]
+        #self.bu_l1 = [1.,0.66,0.33,0.,0.,0.]
+        self.bu_l1 = [1.,1.,1.,1.,1.,1.]
+        self.td_l1 = [0.,0.33,0.66,1.,1.,1.]
 
         if FLAGS.weighting == 'one':
             self.bu_w = [1.,1.,1.,1.,1.,1.]
-            self.td_w = [0.,0.25,0.5,0.75,1.,1.]
+            self.td_w = [0.,0.33,0.66,1.,1.,1.]
         elif FLAGS.weighting == 'two':
             self.bu_w = [1.,1.,1.,1.,1.,1.]
             self.td_w = [0.,0.5,1.,1.,1.,1.]
@@ -116,11 +120,12 @@ class GLOM(nn.Module):
             self.td_w = [0.,0.25,0.5,0.75,1.,1.]
 
         if FLAGS.reg_temp_mode == 'same':
-            self.reg_temp = [FLAGS.reg_temp for ts in range(FLAGS.timesteps)]
-        elif FLAGS.reg_temp_mode == 'one':
-            self.reg_temp = [None,None,0.03,0.02,0.013,0.01]
+            #self.reg_temp = [FLAGS.reg_temp for ts in range(FLAGS.timesteps)]
+            self.reg_temp = [FLAGS.reg_temp_same for l in range(FLAGS.timesteps)]
+        elif FLAGS.reg_temp_mode == 'three':
+            self.reg_temp = [None,0.1,0.2,0.3,0.01]
         elif FLAGS.reg_temp_mode == 'two':
-            self.reg_temp = [None,None,0.04,0.02,0.01,0.006]
+            self.reg_temp = [None,0.2,0.4,0.6,0.006]
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
@@ -159,6 +164,8 @@ class GLOM(nn.Module):
             self.out_norm_ff = nn.ModuleList([nn.InstanceNorm2d(self.embd_dims[level], affine=True) for level in range(self.num_levels)])
 
         self.norm_clip = [128**0.5,128**0.5,128**0.5,256**0.5,512**0.5]
+
+        self.neg_cosine_sim = lambda x1,x2: -F.cosine_similarity(x1,x2)
 
 
     def build_model(self):
@@ -377,56 +384,6 @@ class GLOM(nn.Module):
         cat_embds = torch.cat([rep_embds,self.position_encoding[level]],dim=1)
         
         return self.top_down_net[level](cat_embds)
-
-    def fast_forward_level(self, embeddings, level, top_pos_preds):
-        bs,c,h,w = embeddings.shape
-        if not FLAGS.ff_att_mode:
-            return self.fast_forward_net[level](embeddings), None
-
-        ff_pred = self.fast_forward_net[level](embeddings)
-        pos_pred = self.position_pred[level](ff_pred)
-        # pos_pred.shape == (1,6,h,w)
-        pos_pred = pos_pred.movedim(1,3).reshape(bs,h*w,3,2)
-        if FLAGS.pos_pred_sub_mean:
-            pos_pred = pos_pred-pos_pred.mean(dim=2,keepdim=True)
-        pos_pred_kernel = pos_pred[:,:,:,0:1] + pos_pred[:,:,:,1:2].movedim(2,3) # 1,h*w,3,3
-        if top_pos_preds is not None:
-            if self.strides[level] == 2:
-                top_pos_preds = torch.repeat_interleave(torch.repeat_interleave(top_pos_preds,2,dim=3),2,dim=4)
-            pos_pred_kernel = F.conv2d(pos_pred_kernel,top_pos_preds.reshape(1,3,3,h*w).movedim(3,0),padding=1,groups=h*w) \
-                              .movedim(1,3).reshape(bs,3,3,h,w)
-        else:
-            pos_pred_kernel = pos_pred_kernel.movedim(1,3).reshape(bs,3,3,h,w)
-
-        pos_preds_broadcast = torch.cat([
-            F.pad(pos_pred_kernel[:,0,0,:,:],(0,2,0,2),value=-10000.),
-            F.pad(pos_pred_kernel[:,0,1,:,:],(1,1,0,2),value=-10000.),
-            F.pad(pos_pred_kernel[:,0,2,:,:],(2,0,0,2),value=-10000.),
-            F.pad(pos_pred_kernel[:,1,0,:,:],(0,2,1,1),value=-10000.),
-            F.pad(pos_pred_kernel[:,1,1,:,:],(1,1,1,1),value=-10000.),
-            F.pad(pos_pred_kernel[:,1,2,:,:],(2,0,1,1),value=-10000.),
-            F.pad(pos_pred_kernel[:,2,0,:,:],(0,2,2,0),value=-10000.),
-            F.pad(pos_pred_kernel[:,2,1,:,:],(1,1,2,0),value=-10000.),
-            F.pad(pos_pred_kernel[:,2,2,:,:],(2,0,2,0),value=-10000.)
-            ], dim=0)[:,1:-1,1:-1] # 9,h,w
-
-        location_weights = F.softmax(pos_preds_broadcast/(FLAGS.pos_temp*(pos_preds_broadcast.max(dim=0)[0].abs()+1e-4)),dim=0).unsqueeze(1) #9,1,h,w
-
-        ff_preds_distribute = torch.cat([
-            F.pad(ff_pred,(0,2,0,2)),
-            F.pad(ff_pred,(1,1,0,2)),
-            F.pad(ff_pred,(2,0,0,2)),
-            F.pad(ff_pred,(0,2,1,1)),
-            F.pad(ff_pred,(1,1,1,1)),
-            F.pad(ff_pred,(2,0,1,1)),
-            F.pad(ff_pred,(0,2,2,0)),
-            F.pad(ff_pred,(1,1,2,0)),
-            F.pad(ff_pred,(2,0,2,0))
-            ], dim=0)[:,:,1:-1,1:-1] # 9,c,h,w
-
-        ff_out = (ff_preds_distribute * location_weights).sum(0,keepdim=True)
-
-        return ff_out, pos_pred_kernel
     
     def sample_locations(self, embeddings, level):
         batch_size,embd_size,h,w = embeddings.shape
@@ -437,20 +394,32 @@ class GLOM(nn.Module):
                            .reshape(batch_size,embd_size,h,w,self.num_samples[level])
         return values
 
-    def attend_to_level(self, embeddings, level, ts=-1):
+    def attend_to_level(self, embeddings, level, ts=-1, ret_embds=False):
         batch_size,embd_size,h,w = embeddings.shape
 
         # Implementation of the attention mechanism described on pg 13
         values = self.sample_locations(embeddings, level)
         if FLAGS.l2_norm_att:
-            product = F.normalize(values,dim=1) * F.normalize(embeddings.reshape(batch_size,embd_size,h,w,1),dim=1)
+            sims = (F.normalize(values,dim=1) * F.normalize(embeddings.reshape(batch_size,embd_size,h,w,1),dim=1)).sum(1,keepdim=True)
         else:
-            product = values * embeddings.reshape(batch_size,embd_size,h,w,1)
-        dot_prod = product.sum(1,keepdim=True)
-        weights = F.softmax(dot_prod/self.att_temp[level], dim=4)
+            sims = (values * embeddings.reshape(batch_size,embd_size,h,w,1)).sum(1,keepdim=True)
 
-        prod = values*weights
-        return prod.sum(4)
+        if ret_embds:
+            max_sims,max_idxs = torch.max(sims,dim=4,keepdim=True)
+            min_sims,min_idxs = torch.min(sims,dim=4,keepdim=True)
+            sim_diffs = (max_sims-min_sims).squeeze(-1)
+            diff_avg = sim_diffs.mean()
+            patch_mask = sim_diffs > diff_avg
+
+            max_idxs = max_idxs.repeat((1,embd_size,1,1,1))
+            max_embds = torch.gather(values,4,max_idxs).squeeze(-1)
+            min_idxs = min_idxs.repeat((1,embd_size,1,1,1))
+            min_embds = torch.gather(values,4,min_idxs).squeeze(-1)
+
+            return max_embds.movedim(1,3), min_embds.movedim(1,3), patch_mask.movedim(1,3).squeeze(-1)
+        else:
+            weights = F.softmax(sims/self.att_temp[level], dim=4)
+            return (values*weights).sum(4)
 
     def add_spatial_attention(self, pred_embds, level, ts=-1, ret_att=False):
         if level == 0:
@@ -464,7 +433,16 @@ class GLOM(nn.Module):
         else:
             return level_embd
 
-    def similarity(self, level_embds, pred_embd, level, ts=-1, temp=None):
+    def island_loss(self, level_embds, pred_embd, level):
+        pos_embds,neg_embds,patch_mask = self.attend_to_level(level_embds,level,ret_embds=True)
+
+        pred_embd = pred_embd.movedim(1,3)[patch_mask]
+        pos_embds = pos_embds[patch_mask]
+        neg_embds = neg_embds[patch_mask]
+
+        return F.triplet_margin_with_distance_loss(pred_embd,pos_embds,neg_embds,distance_function=self.neg_cosine_sim,margin=FLAGS.margin)
+
+    def similarity(self, level_embds, pred_embd, level):
         bs,c,h,w = level_embds.shape
 
         pred_embd = F.normalize(pred_embd, dim=1)
@@ -472,22 +450,11 @@ class GLOM(nn.Module):
 
         pred_embd = pred_embd.permute(2,3,0,1)
         pos_sims = torch.matmul(pred_embd,level_embds.permute(2,3,1,0)).reshape(h*w,1)
+
         neg_sims = torch.matmul(pred_embd,self.neg_embds[level]).reshape(h*w,-1)
         all_sims = torch.cat([pos_sims,neg_sims],dim=1)
 
-        return F.cross_entropy(all_sims/temp,self.sim_target[:all_sims.shape[0]])
-
-    def attractor_sim_calc(self, attractor, embd, bu_bu=False):
-        if FLAGS.sim == 'sm_sim':
-            attractor_dist = F.normalize(F.softmax(attractor,dim=1),dim=1)
-            embd_dist = F.normalize(F.softmax(embd,dim=1),dim=1)
-            sim = (attractor_dist*embd_dist).sum(dim=1,keepdim=True)
-        else:
-            attractor = F.normalize(attractor, dim=1)
-            embd = F.normalize(embd, dim=1)
-            sim = (attractor*embd).sum(dim=1,keepdim=True)/2. + 0.5
-
-        return sim
+        return F.cross_entropy(all_sims/FLAGS.cl_temp,self.sim_target[:all_sims.shape[0]])
 
     def crop_and_resize(self, level_embds, dims, target_size):
         resized_embds = {}
@@ -509,9 +476,9 @@ class GLOM(nn.Module):
                 for level in range(1,self.num_levels-1):
                     sim_target = target_embds[level].detach() if FLAGS.sg_target else target_embds[level]
                     if level > 0:
-                        bu_loss.append(self.similarity(sim_target, self.all_bu[level][ts], level, ts=ts, temp=FLAGS.reg_temp))
+                        bu_loss.append(self.island_loss(sim_target, self.all_bu[level][ts], level))
                     if level < self.num_levels-1:
-                        td_loss.append(self.similarity(sim_target, self.all_td[level][ts], level, ts=ts, temp=FLAGS.reg_temp))
+                        td_loss.append(self.island_loss(sim_target, self.all_td[level][ts], level))
 
                 total_bu_loss += sum(bu_loss)/max(1.,len(bu_loss))
                 total_td_loss += sum(td_loss)/max(1.,len(td_loss))
@@ -530,15 +497,15 @@ class GLOM(nn.Module):
                 target = target_embds[level]
                 if FLAGS.cl_symm:
                     if FLAGS.cl_sg:
-                        loss = 0.5*self.similarity(target.detach(), aug_embds[level], level, temp=FLAGS.cl_temp) + \
-                               0.5*self.similarity(aug_embds[level].detach(), target, level, temp=FLAGS.cl_temp)
+                        loss = 0.5*self.similarity(target.detach(), aug_embds[level], level) + \
+                               0.5*self.similarity(aug_embds[level].detach(), target, level)
                     else:
-                        loss = 0.5*self.similarity(target, aug_embds[level], level, temp=FLAGS.cl_temp) + \
-                               0.5*self.similarity(aug_embds[level], target, level, temp=FLAGS.cl_temp)
+                        loss = 0.5*self.similarity(target, aug_embds[level], level) + \
+                               0.5*self.similarity(aug_embds[level], target, level)
                 else:
                     if FLAGS.cl_sg:
                         target = target.detach()
-                    loss = self.similarity(target, aug_embds[level], level, temp=FLAGS.cl_temp)
+                    loss = self.similarity(target, aug_embds[level], level)
 
                 c_loss.append(loss)
             else:
@@ -585,8 +552,8 @@ class GLOM(nn.Module):
                 if level == 0:
                     bu_td_sim = self.attractor_sim_calc(bottom_up, top_down)
                     contrib_sims = torch.cat([self.ones_tensor[:,:,:h,:w],bu_td_sim],dim=1)
-                    pred_embds.append((bottom_up*self.bu_l1[ts] + top_down*self.td_l1[ts]) / \
-                                            (self.bu_l1[ts]+self.td_l1[ts]))
+                    pred_embds.append((bottom_up*self.bu_l1[ts] + top_down*self.td_l1[ts] + prev_timestep*FLAGS.prev_weight) / \
+                                            (self.bu_l1[ts]+self.td_l1[ts]+FLAGS.prev_weight))
                 elif 0 < level < self.num_levels - 1:
                     bu_td_sim = self.attractor_sim_calc(bottom_up, top_down)
                     contrib_sims = torch.cat([self.ones_tensor[:,:,:h,:w],bu_prev_sim,bu_td_sim],dim=1)
@@ -600,14 +567,11 @@ class GLOM(nn.Module):
             level_embds[level] = self.add_spatial_attention(pred_embds[level], level, ts=ts)
 
             # Calculate regularization loss (See bottom of pg 3 and Section 7: Learning Islands)
-            if self.bank_full and (FLAGS.td_bu_reg_own or FLAGS.td_bu_reg_aug):
+            if self.bank_full and (FLAGS.td_bu_reg_own or FLAGS.td_bu_reg_aug or FLAGS.same_img_reg):
                 if level > 0:
                     self.all_bu[level][ts] = bottom_up
                 if level < self.num_levels-1 and level_embds[level+1] is not None:
                     self.all_td[level][ts] = top_down
-
-            if ts == FLAGS.timesteps-1 and level==0:
-                l1_top_down = top_down
 
             # level_deltas measures the magnitude of the change in the embeddings between timesteps; when the change is less than a 
             # certain threshold the embedding updates are stopped.
@@ -630,8 +594,6 @@ class GLOM(nn.Module):
                         neg_sample = level_embds[level][0,:,torch.randint(0,h,(FLAGS.neg_per_ts,)),torch.randint(0,w,(FLAGS.neg_per_ts,))].detach()
                         self.temp_neg[level].append(F.normalize(neg_sample, dim=0))
 
-        if ts == FLAGS.timesteps-1:
-            level_embds[0] = l1_top_down
         logs = [level_deltas, level_norms, level_sims]
         return level_embds, pred_embds, logs
 
@@ -680,8 +642,8 @@ class GLOM(nn.Module):
 
         target_embds = self.crop_and_resize(level_embds,dims,(aug_embds[2].shape[2],aug_embds[2].shape[3]))
 
-        if FLAGS.td_bu_reg_own:
-            reg_losses, reg_logs = self.calculate_reg_losses(aug_embds)
+        if FLAGS.td_bu_reg_own or FLAGS.same_img_reg:
+            reg_losses, reg_logs = self.calculate_reg_losses(level_embds)
         elif FLAGS.td_bu_reg_aug:
             reg_losses, reg_logs = self.calculate_reg_losses(target_embds)
         else:
@@ -845,6 +807,18 @@ class GLOM(nn.Module):
             reconst_img = None
 
         return reconst_img, level_embds, pred_embds, logs
+
+    def attractor_sim_calc(self, attractor, embd, bu_bu=False):
+        if FLAGS.sim == 'sm_sim':
+            attractor_dist = F.normalize(F.softmax(attractor,dim=1),dim=1)
+            embd_dist = F.normalize(F.softmax(embd,dim=1),dim=1)
+            sim = (attractor_dist*embd_dist).sum(dim=1,keepdim=True)
+        else:
+            attractor = F.normalize(attractor, dim=1)
+            embd = F.normalize(embd, dim=1)
+            sim = (attractor*embd).sum(dim=1,keepdim=True)/2. + 0.5
+
+        return sim
 
     def forward(self, img):
         batch_size,chans,h,w = img.shape
