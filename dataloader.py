@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import cv2
+import time
 
 from utils import resize_image, normalize_image, mask_random_crop, random_crop_resize
 
@@ -27,10 +28,19 @@ class JHMDB_Dataset(torch.utils.data.Dataset):
         video_file = self.video_files[index]
         video_cap = cv2.VideoCapture(video_file)
         frames = []
+        idx_offset = 0
+        fails = 0
         while True:
             ret,frame = video_cap.read()
             if not ret:
-                break
+                time.sleep(0.1)
+                fails += 1
+                if fails > 10:
+                    idx_offset += 1
+                    video_cap = cv2.VideoCapture(self.video_files[min(len(self.video_files)-1,index+idx_offset)])
+                elif fails > 100:
+                    break
+                continue
 
             if count == f_ix:
                 cropped,dims = random_crop_resize(frame)

@@ -189,18 +189,21 @@ class GLOM(nn.Module):
     def encoder(self, level):
         # A separate encoder (bottom-up net) is used for each level and shared among locations within each level (hence the use of 1x1 convolutions 
         # since it makes the implementation easier).
+        hid_width = int(self.embd_dims[level+1]*FLAGS.width)
         encoder_layers = []
-        encoder_layers.append(('enc_lev{}_0'.format(level+1), nn.Conv2d(self.embd_dims[level],self.embd_dims[level+1],
+        encoder_layers.append(('enc_lev{}_0'.format(level+1), nn.Conv2d(self.embd_dims[level],hid_width,
                                 kernel_size=self.strides[level],stride=self.strides[level])))
 
-        encoder_layers.append(('enc_norm{}_0'.format(level+1), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
+        encoder_layers.append(('enc_norm{}_0'.format(level+1), nn.InstanceNorm2d(hid_width, affine=True)))
 
         encoder_layers.append(('enc_act{}_0'.format(level+1), nn.Hardswish(inplace=True)))
         for layer in range(1,self.bottom_up_layers):
-            encoder_layers.append(('enc_lev{}_{}'.format(level+1,layer), nn.Conv2d(self.embd_dims[level+1],self.embd_dims[level+1],kernel_size=1,stride=1)))
             if layer < self.bottom_up_layers-1:
-                encoder_layers.append(('enc_norm{}_{}'.format(level+1,layer), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
+                encoder_layers.append(('enc_lev{}_{}'.format(level+1,layer), nn.Conv2d(hid_width,hid_width,kernel_size=1,stride=1)))
+                encoder_layers.append(('enc_norm{}_{}'.format(level+1,layer), nn.InstanceNorm2d(hid_width, affine=True)))
                 encoder_layers.append(('enc_act{}_{}'.format(level+1,layer), nn.Hardswish(inplace=True)))
+            else:
+                encoder_layers.append(('enc_lev{}_{}'.format(level+1,layer), nn.Conv2d(hid_width,self.embd_dims[level+1],kernel_size=1,stride=1)))
 
         return nn.Sequential(OrderedDict(encoder_layers))
 
@@ -210,23 +213,22 @@ class GLOM(nn.Module):
         # which describes how they should be implemented (not sure why he recommends sinusoids).
         decoder_layers = []
         fan_in = self.embd_dims[level+1] + 4*self.num_pos_freqs
-        decoder_layers.append(('dec_lev{}_0'.format(level), nn.Conv2d(fan_in,self.embd_dims[level+1],kernel_size=1,stride=1)))
+        hid_width = int(self.embd_dims[level]*FLAGS.width)
+        decoder_layers.append(('dec_lev{}_0'.format(level), nn.Conv2d(fan_in,hid_width,kernel_size=1,stride=1)))
         #nn.init.uniform_(decoder_layers[-1][1].weight, -self.td_w0*(6/fan_in)**0.5, self.td_w0*(6/fan_in)**0.5)
-        decoder_layers.append(('dec_norm{}_0'.format(level), nn.InstanceNorm2d(self.embd_dims[level+1], affine=True)))
+        decoder_layers.append(('dec_norm{}_0'.format(level), nn.InstanceNorm2d(hid_width, affine=True)))
 
         #decoder_layers.append(('dec_act{}_0'.format(level), Sine()))
         decoder_layers.append(('dec_act{}_0'.format(level), nn.Hardswish(inplace=True)))
-        fan_in = self.embd_dims[level+1]
         for layer in range(1,self.top_down_layers):
-            decoder_layers.append(('dec_lev{}_{}'.format(level,layer), nn.Conv2d(fan_in,self.embd_dims[level],kernel_size=1,stride=1)))
             #nn.init.uniform_(decoder_layers[-1][1].weight, -(6/fan_in)**0.5, (6/self.embd_dims[level])**0.5)
             if layer < self.top_down_layers-1:
-                decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(self.embd_dims[level], affine=True)))
-
+                decoder_layers.append(('dec_lev{}_{}'.format(level,layer), nn.Conv2d(hid_width,hid_width,kernel_size=1,stride=1)))
+                decoder_layers.append(('dec_norm{}_{}'.format(level,layer), nn.InstanceNorm2d(hid_width, affine=True)))
                 #decoder_layers.append(('dec_act{}_{}'.format(level,layer), Sine()))
                 decoder_layers.append(('dec_act{}_{}'.format(level,layer), nn.Hardswish(inplace=True)))
-
-            fan_in = self.embd_dims[level]
+            else:
+                decoder_layers.append(('dec_lev{}_{}'.format(level,layer), nn.Conv2d(hid_width,self.embd_dims[level],kernel_size=1,stride=1)))
 
         return nn.Sequential(OrderedDict(decoder_layers))
 
@@ -385,20 +387,24 @@ class GLOM(nn.Module):
         
         return self.top_down_net[level](cat_embds)
     
-    def sample_locations(self, embeddings, level):
+    def sample_locations(self, embeddings, level, num_samples):
         batch_size,embd_size,h,w = embeddings.shape
 
         # Randomly sample other locations on the same level to attend to (described on pg 16, final paragraph of 6: Replicating Islands)
-        sampled_idxs = torch.multinomial(self.probs[level][:h,:w,:h,:w].reshape(h*w,h*w), self.num_samples[level])
-        values = embeddings.reshape(embd_size,h*w)[:,sampled_idxs.reshape(h*w*self.num_samples[level])] \
-                           .reshape(batch_size,embd_size,h,w,self.num_samples[level])
+        sampled_idxs = torch.multinomial(self.probs[level][:h,:w,:h,:w].reshape(h*w,h*w), num_samples)
+        values = embeddings.reshape(embd_size,h*w)[:,sampled_idxs.reshape(h*w*num_samples)] \
+                           .reshape(batch_size,embd_size,h,w,num_samples)
         return values
 
     def attend_to_level(self, embeddings, level, ts=-1, ret_embds=False):
         batch_size,embd_size,h,w = embeddings.shape
 
         # Implementation of the attention mechanism described on pg 13
-        values = self.sample_locations(embeddings, level)
+        if ret_embds:
+            values = self.sample_locations(embeddings, level, FLAGS.reg_samples)
+        else:
+            values = self.sample_locations(embeddings, level, self.num_samples[level])
+
         if FLAGS.l2_norm_att:
             sims = (F.normalize(values,dim=1) * F.normalize(embeddings.reshape(batch_size,embd_size,h,w,1),dim=1)).sum(1,keepdim=True)
         else:

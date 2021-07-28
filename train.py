@@ -36,7 +36,7 @@ flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean,l2,l2_clip')
 
 # Contrastive learning flags
 flags.DEFINE_integer('num_neg_imgs',50,'')
-flags.DEFINE_integer('neg_per_ts',4,'')
+flags.DEFINE_integer('neg_per_ts',1,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
 
 flags.DEFINE_float('cl_temp',0.01,'')
@@ -44,7 +44,7 @@ flags.DEFINE_bool('cl_symm',False,'')
 flags.DEFINE_bool('cl_sg',True,'')
 flags.DEFINE_integer('jitter',0,'')
 
-flags.DEFINE_float('margin',0.5,'')
+flags.DEFINE_float('margin',0.45,'')
 flags.DEFINE_bool('same_img_reg',True,'')
 flags.DEFINE_bool('td_bu_reg_own',False,'')
 flags.DEFINE_bool('td_bu_reg_aug',False,'')
@@ -70,9 +70,10 @@ flags.DEFINE_float('prev_weight',2.,'')
 flags.DEFINE_string('weighting','one','')
 
 # Attention flags
-flags.DEFINE_string('att_temp','one','')
+flags.DEFINE_string('att_temp','same','')
+flags.DEFINE_integer('reg_samples',4,'')
 flags.DEFINE_string('att_weight','same','exp,linear,same')
-flags.DEFINE_float('att_t',0.5,'')
+flags.DEFINE_float('att_t',0.2,'')
 flags.DEFINE_float('att_w',1.,'')
 flags.DEFINE_bool('l2_norm_att',True,'')
 flags.DEFINE_float('reg_temp_bank',0.01,'')
@@ -81,7 +82,7 @@ flags.DEFINE_string('reg_temp_mode','three','')
 flags.DEFINE_float('std_scale',1,'')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
-flags.DEFINE_float('reg_coeff',3.,'Coefficient used for regularization loss')
+flags.DEFINE_float('reg_coeff',2.,'Coefficient used for regularization loss')
 flags.DEFINE_float('cl_coeff',1.,'Coefficient used for contrastive loss')
 flags.DEFINE_bool('linear_input',True,'')
 flags.DEFINE_bool('linear_reconst',True,'')
@@ -93,6 +94,7 @@ flags.DEFINE_string('granularity','4,8,8,8,16','')
 flags.DEFINE_integer('embd_mult',16,'Embedding size relative to patch size')
 
 flags.DEFINE_integer('fast_forward_layers',3,'Number of layers for Fast-Forward network')
+flags.DEFINE_float('width',1.5,'')
 flags.DEFINE_integer('bottom_up_layers',3,'Number of layers for Bottom-Up network')
 flags.DEFINE_integer('top_down_layers',3,'Number of layers for Top-Down network')
 flags.DEFINE_integer('input_cnn_depth',3,'Number of convolutional layers for input CNN')
@@ -139,7 +141,7 @@ def main(argv):
     #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
     if FLAGS.plot:
-        model.load_state_dict(torch.load('weights/25Julie11.pt'))
+        model.load_state_dict(torch.load('weights/27Julie13.pt'))
 
     if FLAGS.use_agc:
         optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
@@ -175,7 +177,7 @@ def main(argv):
             losses, logs, level_embds = model.forward_contrastive(image,aug_img,crop_dims)
             reconstruction_loss, cl_loss, reg_loss = losses
             bu_loss,td_loss = reg_loss
-            final_loss = 300*reconstruction_loss + FLAGS.reg_coeff*(bu_loss + td_loss) + FLAGS.cl_coeff*cl_loss
+            final_loss = 150*reconstruction_loss + FLAGS.reg_coeff*(bu_loss + td_loss) + FLAGS.cl_coeff*cl_loss
 
             # Calculate gradients of the weights
             final_loss.backward()
