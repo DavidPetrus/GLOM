@@ -1,9 +1,10 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 import cv2
 import time
 
-from utils import resize_image, normalize_image, mask_random_crop, random_crop_resize
+from utils import resize_image, normalize_image, mask_random_crop, random_crop_resize, color_distortion
 
 from absl import flags
 
@@ -67,6 +68,8 @@ class ADE20k_Dataset(torch.utils.data.Dataset):
         #self.labels = labels
         self.image_files = image_files
         self.granularity = granularity
+        self.color_aug = color_distortion(FLAGS.aug_strength*FLAGS.brightness, FLAGS.aug_strength*FLAGS.contrast, \
+                                          FLAGS.aug_strength*FLAGS.saturation, FLAGS.aug_strength*FLAGS.hue)
 
   def __len__(self):
         return len(self.image_files)
@@ -76,10 +79,15 @@ class ADE20k_Dataset(torch.utils.data.Dataset):
         img_file = self.image_files[index]
 
         img = cv2.imread(img_file)[:,:,::-1]
-        img = resize_image(img, self.granularity[-1])
-        img = normalize_image(img)
-        img = torch.from_numpy(np.ascontiguousarray(img))
-        masked_img, mask = mask_random_crop(img.detach().clone())
-        net_input = torch.cat([masked_img, mask], dim=2)
+        img = img[:img.shape[0]-img.shape[0]%8,:img.shape[1]-img.shape[1]%8]
+        img = img[:512,:512]
+        img = torch.from_numpy(np.ascontiguousarray(img)).float()
+        img = img.movedim(2,0)
 
-        return torch.movedim(net_input,2,0), torch.movedim(img,2,0)
+        aug, crop_dims = random_crop_resize(img)
+        img = normalize_image(img)
+        aug = normalize_image(aug)
+        img = self.color_aug(img)
+        aug = self.color_aug(aug)
+        
+        return img, aug, crop_dims

@@ -59,8 +59,10 @@ class GLOM(nn.Module):
         grid_size = max(img_h//self.granularity[1],img_w//self.granularity[1])
         self.level_size = [(int(img_h/patch_size),int(img_w/patch_size)) for patch_size in granularity]
 
-        self.neg_embds = [None for l in range(self.num_levels)]
-        self.temp_neg = [[] for l in range(self.num_levels)]
+        #self.neg_embds = [None for l in range(self.num_levels)]
+        #self.temp_neg = [[] for l in range(self.num_levels)]
+        self.neg_embds = None
+        self.temp_neg = []
         self.bank_full = False
         self.all_bu = {0: [], 1: [], 2: [], 3: [], 4: []}
         self.all_td = {0: [], 1: [], 2: [], 3: [], 4: []}
@@ -129,11 +131,11 @@ class GLOM(nn.Module):
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
-        self.num_samples = [None,12,20,20,20]
+        self.num_samples = [None,10,10,10,10]
 
         self.zero_tensor = torch.zeros([1,1,1,1], device='cuda')
         self.ones_tensor = torch.ones([1,1,l1_h,l1_w], device='cuda')
-        self.sim_target = torch.zeros(l1_h*l1_w,dtype=torch.long,device='cuda')
+        self.sim_target = torch.zeros(512*800,dtype=torch.long,device='cuda')
 
         att_stds = [int(1/self.granularity[l]*2**(l+1+FLAGS.std_scale)) for l in range(1,self.num_levels)]
         self.probs = {}
@@ -169,7 +171,7 @@ class GLOM(nn.Module):
 
 
     def build_model(self):
-        # Initialize seperate Bottom-Up net for each level
+        '''# Initialize seperate Bottom-Up net for each level
         self.bottom_up_net = nn.ModuleList([None]+[self.encoder(l-1) for l in range(1,self.num_levels)])
         # Initialize seperate Top-Down net for each level
         self.top_down_net = nn.ModuleList([self.decoder(l) for l in range(self.num_levels-1)])
@@ -184,7 +186,111 @@ class GLOM(nn.Module):
             self.position_encoding.append(torch.cat([width_pos.repeat((1,1,self.level_size[l][0],1)),height_pos.repeat((1,1,1,self.level_size[l][1]))],dim=1))
 
         self.input_cnn = self.build_input_cnn()
-        self.build_reconstruction_net()
+        self.build_reconstruction_net()'''
+
+        self.seg_cnn = self.cnn()
+        self.reconstruction_net = nn.Conv2d(128,192,kernel_size=1,stride=1)
+
+    def cnn(self):
+        cnn_channels = [3,32,32,32,32,64,64,64,64,128,128,128,128]
+        strides = [1,2,1,1,2,1,1,1,2,1,1,1,1]
+        skips = [False,]
+        cnn_layers = []
+        cnn_layers.append(nn.Sequential(nn.Conv2d(cnn_channels[0],cnn_channels[1],kernel_size=5,stride=1,padding=2), \
+                                        nn.InstanceNorm2d(cnn_channels[1], affine=True),nn.Hardswish(inplace=True)))
+        for l in range(1,len(cnn_channels)-1):
+            cnn_layers.append(nn.Sequential(nn.Conv2d(cnn_channels[l],cnn_channels[l+1],kernel_size=3,stride=strides[l],padding=1), \
+                                            nn.InstanceNorm2d(cnn_channels[l+1], affine=True),nn.Hardswish(inplace=True)))
+
+        cnn_layers.append(nn.Conv2d(cnn_channels[-1],cnn_channels[-1],kernel_size=3,stride=1,padding=1))
+
+        return nn.ModuleList(cnn_layers)
+
+    def cnn_forward(self, x):
+        skips = [1,4,8,12]
+        skip_connect = None
+        for l_ix,l in enumerate(self.seg_cnn):
+            if l_ix in skips and skip_connect is not None:
+                x = x+skip_connect
+
+            x = l(x)
+            if l_ix in skips:
+                skip_connect = x
+
+        neg_sample = x[0,:,torch.randint(0,x.shape[2],(FLAGS.neg_per_ts,)),torch.randint(0,x.shape[3],(FLAGS.neg_per_ts,))].detach()
+        self.temp_neg.append(F.normalize(neg_sample, dim=0))
+
+        reconst_img = self.reconstruct_image(x)
+
+        return x,reconst_img
+
+    def cnn_similarity(self, level_embds, pred_embd):
+        bs,c,h,w = level_embds.shape
+
+        pred_embd = F.normalize(pred_embd, dim=1)
+        level_embds = F.normalize(level_embds, dim=1)
+
+        pred_embd = pred_embd.permute(2,3,0,1)
+        pos_sims = torch.matmul(pred_embd,level_embds.permute(2,3,1,0)).reshape(h*w,1)
+
+        neg_sims = torch.matmul(pred_embd,self.neg_embds).reshape(h*w,-1)
+        all_sims = torch.cat([pos_sims,neg_sims],dim=1)
+
+        return F.cross_entropy(all_sims/FLAGS.cl_temp,self.sim_target[:all_sims.shape[0]])
+
+    def cnn_crop_and_resize(self, level_embds, dims, target_size):
+        resized_embds = {}
+        cropped = level_embds[:,:,dims[1]:dims[1]+dims[3],dims[0]:dims[0]+dims[2]]
+        resized_embds = F.interpolate(cropped,size=target_size,mode='bilinear',align_corners=True)
+
+        return resized_embds
+
+    def cnn_contrastive_loss(self, aug_embds, target_embds):
+        if self.bank_full:
+            target = target_embds
+            if FLAGS.cl_symm:
+                if FLAGS.cl_sg:
+                    loss = 0.5*self.cnn_similarity(target.detach(), aug_embds) + \
+                           0.5*self.cnn_similarity(aug_embds.detach(), target)
+                else:
+                    loss = 0.5*self.cnn_similarity(target, aug_embds) + \
+                           0.5*self.cnn_similarity(aug_embds, target)
+            else:
+                if FLAGS.cl_sg:
+                    target = target.detach()
+                loss = self.cnn_similarity(target, aug_embds)
+        else:
+            loss = 0.
+
+        return loss
+
+    def cl_seg_forward(self, image, aug_img, dims):
+        if not self.bank_full and len(self.temp_neg) >= FLAGS.num_neg_imgs*FLAGS.neg_per_ts*2:
+            self.bank_full = True
+
+        if self.bank_full:
+            self.neg_embds = torch.cat(self.temp_neg, dim=1)
+            del self.temp_neg[:int(len(self.temp_neg)/FLAGS.num_neg_imgs)]
+
+        embds,reconst_img = self.cnn_forward(image)
+        aug_embds,aug_reconst = self.cnn_forward(aug_img)
+
+        if FLAGS.plot:
+            segs = plot_embeddings(embds)
+            display_reconst_img(reconst_img,image,segs=segs)
+
+            segs = plot_embeddings(aug_embds)
+            display_reconst_img(aug_reconst,aug_img,segs=segs)
+
+        target_embds = self.cnn_crop_and_resize(embds,dims,(aug_embds.shape[2],aug_embds.shape[3]))
+
+        cl_loss = self.cnn_contrastive_loss(aug_embds,target_embds)
+
+        img_reconst_loss = F.mse_loss(reconst_img, image)
+        aug_reconst_loss = F.mse_loss(aug_reconst, aug_img)
+        reconst_loss = img_reconst_loss + aug_reconst_loss
+
+        return cl_loss, reconst_loss, embds
 
     def encoder(self, level):
         # A separate encoder (bottom-up net) is used for each level and shared among locations within each level (hence the use of 1x1 convolutions 

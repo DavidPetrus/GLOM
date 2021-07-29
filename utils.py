@@ -1,5 +1,7 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
+import torchvision
 import cv2
 #import matplotlib.pyplot as plt
 import time
@@ -23,11 +25,10 @@ def resize_image(image, max_patch_size):
     return image[lu[0]:lu[0]+new_height, lu[1]:lu[1]+new_width]
 
 def normalize_image(image):
-    image = image.astype(np.float32)
+    image = image.float()
     image /= 255.
 
     return image
-
 
 def mask_random_crop(image):
     # Mask a random crop in the input image
@@ -41,18 +42,26 @@ def mask_random_crop(image):
     image[mask.bool()] = 0.5
     return image, mask.view(mask.shape[0],mask.shape[1],1)
 
-
 def random_crop_resize(image):
-    size_frac = np.random.randint(5,10)
+    c,h,w = image.shape
+    aspect_ratio = h/w
 
-    c_h,c_w = size_frac*24,size_frac*36
-    crop_dims = [np.random.randint(0,40-size_frac*4), np.random.randint(0,30-size_frac*3)]
-    lu = (crop_dims[0]*8 + np.random.randint(-FLAGS.jitter,FLAGS.jitter+1),
-          crop_dims[1]*8 + np.random.randint(-FLAGS.jitter,FLAGS.jitter+1))
-    crop = image[lu[1]:lu[1]+c_h,lu[0]:lu[0]+c_w]
-    resized = cv2.resize(crop, (image.shape[1],image.shape[0]))
-    return resized, [crop_dims[0],crop_dims[1],size_frac*4,size_frac*3]
+    c_h,c_w = int(h*FLAGS.crop_size)//8, int(w*FLAGS.crop_size)//8
+    if FLAGS.crop_size == 1.:
+        crop_x,crop_y = 0,0
+    else:
+        crop_x,crop_y = np.random.randint(0,w//8-c_w), np.random.randint(0,h//8-c_h)
 
+    crop = image[:,crop_y*8:crop_y*8+c_h*8, crop_x*8:crop_x*8+c_w*8]
+
+    t_size = (h,w) if w<512 else (int(512*aspect_ratio),512)
+    resized = F.interpolate(crop.unsqueeze(0),size=t_size,mode='bilinear',align_corners=True).squeeze(0)
+
+    return resized, [crop_x,crop_y,c_w,c_h]
+
+def color_distortion(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2):
+    color_jitter = torchvision.transforms.ColorJitter(brightness,contrast,saturation,hue)
+    return color_jitter
 
 def calculate_vars(log_dict, level_embds, pca):
     for l_ix, embd_tensor in enumerate(level_embds):
@@ -89,12 +98,14 @@ def find_clusters(log_dict, level_embds):
     start = time.time()
     for dist_thresh in [0.05,0.1,0.2,0.3,0.5]:
         agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,affinity='cosine',linkage='average')
-        for l_ix, embd_tensor in enumerate(level_embds):
-            embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
-            _,l_h,l_w,_ = embds.shape
-            embds = embds.reshape(l_h*l_w,-1)
-            fitted = agglom_clust.fit(embds)
-            log_dict['n_clusters/l{}_{}'.format(l_ix+1,dist_thresh)] = fitted.n_clusters_
+        #for l_ix, embd_tensor in enumerate(level_embds):
+        l_ix = 0
+        embd_tensor = level_embds
+        embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
+        _,l_h,l_w,_ = embds.shape
+        embds = embds.reshape(l_h*l_w,-1)
+        fitted = agglom_clust.fit(embds)
+        log_dict['n_clusters/l{}_{}'.format(l_ix+1,dist_thresh)] = fitted.n_clusters_
     
     print('Clustering Time:',time.time()-start)
     return log_dict
