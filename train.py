@@ -8,7 +8,7 @@ import datetime
 
 from glom import GLOM
 from dataloader import JHMDB_Dataset, ADE20k_Dataset
-from utils import parse_logs, calculate_vars, find_clusters, plot_embeddings, parse_image_logs
+from utils import parse_logs, calculate_vars, find_clusters, plot_embeddings, parse_image_logs, color_distortion
 
 from sklearn.decomposition import PCA
 
@@ -21,14 +21,12 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('dataset','ADE','ADE,JHMDB')
 flags.DEFINE_bool('plot',False,'')
-flags.DEFINE_float('dist_thresh',0.1,'')
+flags.DEFINE_float('dist_thresh',0.4,'')
 flags.DEFINE_string('root_dir','/home/petrus/JHMDB_dataset','')
 flags.DEFINE_integer('batch_size',1,'')
 flags.DEFINE_bool('use_agc',False,'')
 flags.DEFINE_float('clip_grad',50.,'')
 flags.DEFINE_integer('num_workers',8,'')
-flags.DEFINE_integer('min_crop_size',24,'Minimum size of cropped region')
-flags.DEFINE_integer('max_crop_size',64,'Maximum size of cropped region')
 flags.DEFINE_bool('only_reconst',False,'')
 flags.DEFINE_integer('skip_frames',2,'')
 flags.DEFINE_integer('frame_log',1,'')
@@ -36,7 +34,12 @@ flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean,l2,l2_clip')
 flags.DEFINE_integer('reconst_coeff',0,'')
 
 # Augmentations
-flags.DEFINE_float('crop_size',0.5,'Height/width size of crop')
+flags.DEFINE_float('min_crop',0.2,'Height/width size of crop')
+flags.DEFINE_float('max_crop',0.5,'Height/width size of crop')
+flags.DEFINE_integer('num_crops',2,'')
+flags.DEFINE_bool('aug_resize',True,'')
+flags.DEFINE_float('min_resize',0.8,'Height/width size of resize')
+flags.DEFINE_float('max_resize',1.6,'Height/width size of resize')
 flags.DEFINE_float('aug_strength',0.5,'')
 flags.DEFINE_float('brightness',0.8,'')
 flags.DEFINE_float('contrast',0.8,'')
@@ -46,19 +49,18 @@ flags.DEFINE_integer('jitter',0,'')
 
 # Contrastive learning flags
 flags.DEFINE_integer('num_neg_imgs',50,'')
-flags.DEFINE_integer('neg_per_ts',1,'')
+flags.DEFINE_integer('neg_per_ts',2,'')
 flags.DEFINE_integer('num_neg_ts',1,'')
-
+flags.DEFINE_string('mode','full_att_nn','full_att_nn,full_att')
 flags.DEFINE_float('cl_temp',0.1,'')
 flags.DEFINE_bool('cl_symm',False,'')
-flags.DEFINE_bool('cl_sg',True,'')
+flags.DEFINE_bool('cl_sg',False,'')
 
 flags.DEFINE_float('margin',0.45,'')
 flags.DEFINE_bool('same_img_reg',True,'')
 flags.DEFINE_bool('td_bu_reg_own',False,'')
 flags.DEFINE_bool('td_bu_reg_aug',False,'')
 flags.DEFINE_integer('ts_reg',2,'')
-flags.DEFINE_integer('neg_bank_ts',4,'')
 flags.DEFINE_bool('sg_target',False,'')
 
 flags.DEFINE_bool('sim_target_att',True,'')
@@ -74,21 +76,23 @@ flags.DEFINE_float('ff_reg',0.,'')
 
 # Timestep update flags
 flags.DEFINE_string('sim','none','none, sm_sim')
-flags.DEFINE_integer('timesteps',6,'Number of timesteps')
+flags.DEFINE_integer('timesteps',3,'Number of timesteps')
 flags.DEFINE_float('prev_weight',2.,'')
 flags.DEFINE_string('weighting','one','')
 
 # Attention flags
 flags.DEFINE_string('att_temp','same','')
-flags.DEFINE_integer('reg_samples',4,'')
+flags.DEFINE_integer('reg_samples',0,'')
 flags.DEFINE_string('att_weight','same','exp,linear,same')
 flags.DEFINE_float('att_t',0.2,'')
 flags.DEFINE_float('att_w',1.,'')
+flags.DEFINE_integer('att_samples',10,'')
+flags.DEFINE_integer('cl_samples',10,'')
 flags.DEFINE_bool('l2_norm_att',True,'')
 flags.DEFINE_float('reg_temp_bank',0.01,'')
 flags.DEFINE_float('reg_temp_same',0.3,'')
 flags.DEFINE_string('reg_temp_mode','three','')
-flags.DEFINE_float('std_scale',1,'')
+flags.DEFINE_float('std_scale',3,'')
 
 flags.DEFINE_float('lr',0.0003,'Learning Rate')
 flags.DEFINE_float('reg_coeff',1.,'Coefficient used for regularization loss')
@@ -150,13 +154,16 @@ def main(argv):
         validation_set = JHMDB_Dataset(validation_vids, granularity)
         validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
 
+    color_aug = color_distortion(FLAGS.aug_strength*FLAGS.brightness, FLAGS.aug_strength*FLAGS.contrast, \
+                                          FLAGS.aug_strength*FLAGS.saturation, FLAGS.aug_strength*FLAGS.hue)
+
     model = GLOM(num_levels=FLAGS.num_levels, embd_mult=FLAGS.embd_mult, granularity=granularity, bottom_up_layers=FLAGS.bottom_up_layers, 
                 fast_forward_layers=FLAGS.fast_forward_layers , top_down_layers=FLAGS.top_down_layers, num_input_layers=FLAGS.input_cnn_depth, num_reconst=FLAGS.num_reconst)
 
     #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
     if FLAGS.plot:
-        model.load_state_dict(torch.load('weights/28July2.pt'))
+        model.load_state_dict(torch.load('weights/30July6.pt'))
 
     if FLAGS.use_agc:
         optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
@@ -186,7 +193,11 @@ def main(argv):
 
             #frames = [frame.to('cuda') for frame in frames_load]
             image = frames_load[0].to('cuda')
-            aug_img = frames_load[1].to('cuda')
+            image = color_aug(image)
+            crop_imgs = []
+            for crop_img in frames_load[1]:
+                crop_imgs.append(color_aug(crop_img.to('cuda')))
+
             crop_dims = frames_load[2]
 
             '''losses, logs, level_embds = model.forward_contrastive(image,aug_img,crop_dims)
@@ -218,11 +229,13 @@ def main(argv):
                 #log_dict = parse_logs(log_dict,logs)
                 log_dict = parse_image_logs(log_dict,logs)'''
 
-            cl_loss, reconst_loss, level_embds = model.cl_seg_forward(image, aug_img, crop_dims)
+            cl_loss, reconst_loss, level_embds, cl_losses = model.cl_seg_forward(image, crop_imgs, crop_dims)
             final_loss = FLAGS.reconst_coeff*reconst_loss + cl_loss
 
             train_iter += 1
-            log_dict = {"Epoch":epoch,"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss": reconst_loss, "Contrastive Loss":final_loss}
+            log_dict = {"Epoch":epoch,"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss": reconst_loss, "Contrastive Loss":cl_loss}
+            for crop_ix,cl_l in enumerate(cl_losses):
+                log_dict["CL_Loss_{}".format(crop_ix)] = cl_l
 
             if final_loss > 0.:
                 final_loss.backward()
@@ -268,7 +281,7 @@ def main(argv):
                 val_td_loss += td_loss
                 val_count += 1'''
 
-                cl_loss, reconst_loss, level_embds = model.cl_seg_forward(image, aug_img, crop_dims)
+                cl_loss, reconst_loss, level_embds, cl_losses = model.cl_seg_forward(image, aug_img, crop_dims)
                 val_cl_loss += cl_loss
                 val_reconstruction_loss += reconst_loss
                 val_count += 1

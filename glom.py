@@ -52,8 +52,8 @@ class GLOM(nn.Module):
         self.strides = [2 if self.granularity[l]<self.granularity[l+1] else 1 for l in range(self.num_levels-1)]
         self.embd_dims = [embd_mult*patch_size for patch_size in granularity]
 
-        img_h = 240
-        img_w = 320
+        img_h = 800
+        img_w = 800
         l1_h = img_h//self.granularity[0]
         l1_w = img_w//self.granularity[0]
         grid_size = max(img_h//self.granularity[1],img_w//self.granularity[1])
@@ -131,13 +131,14 @@ class GLOM(nn.Module):
 
         # Parameters used for attention, at each location x, num_samples of other locations are sampled using a Gaussian 
         # centered at x (described on pg 16, final paragraph of 6: Replicating Islands)
-        self.num_samples = [None,10,10,10,10]
+        self.num_samples = [None,FLAGS.att_samples,FLAGS.att_samples,FLAGS.att_samples,FLAGS.att_samples]
 
         self.zero_tensor = torch.zeros([1,1,1,1], device='cuda')
         self.ones_tensor = torch.ones([1,1,l1_h,l1_w], device='cuda')
         self.sim_target = torch.zeros(512*800,dtype=torch.long,device='cuda')
 
-        att_stds = [int(1/self.granularity[l]*2**(l+1+FLAGS.std_scale)) for l in range(1,self.num_levels)]
+        #att_stds = [int(1/self.granularity[l]*2**(l+1+FLAGS.std_scale)) for l in range(1,self.num_levels)]
+        att_stds = [FLAGS.std_scale,FLAGS.std_scale,FLAGS.std_scale,FLAGS.std_scale]
         self.probs = {}
         for l,patch_size in zip(range(self.num_levels), self.granularity):
             if self.att_w[l] == 0.: continue
@@ -217,12 +218,7 @@ class GLOM(nn.Module):
             if l_ix in skips:
                 skip_connect = x
 
-        neg_sample = x[0,:,torch.randint(0,x.shape[2],(FLAGS.neg_per_ts,)),torch.randint(0,x.shape[3],(FLAGS.neg_per_ts,))].detach()
-        self.temp_neg.append(F.normalize(neg_sample, dim=0))
-
-        reconst_img = self.reconstruct_image(x)
-
-        return x,reconst_img
+        return x
 
     def cnn_similarity(self, level_embds, pred_embd):
         bs,c,h,w = level_embds.shape
@@ -264,7 +260,7 @@ class GLOM(nn.Module):
 
         return loss
 
-    def cl_seg_forward(self, image, aug_img, dims):
+    def cl_seg_forward(self, image, aug_imgs, dims):
         if not self.bank_full and len(self.temp_neg) >= FLAGS.num_neg_imgs*FLAGS.neg_per_ts*2:
             self.bank_full = True
 
@@ -272,25 +268,42 @@ class GLOM(nn.Module):
             self.neg_embds = torch.cat(self.temp_neg, dim=1)
             del self.temp_neg[:int(len(self.temp_neg)/FLAGS.num_neg_imgs)]
 
-        embds,reconst_img = self.cnn_forward(image)
-        aug_embds,aug_reconst = self.cnn_forward(aug_img)
+        img_embds = self.cnn_forward(image)
+        for ts in range(FLAGS.timesteps):
+            if ts == FLAGS.timesteps-1:
+                img_embds,att_embds = self.add_spatial_attention(img_embds,4,num_samples=FLAGS.cl_samples,ret_att=True)
+            else:
+                img_embds,att_embds = self.add_spatial_attention(img_embds,4,ret_att=True)
+
+        if FLAGS.mode == 'full_att_nn':
+            target_embds = att_embds
+        elif FLAGS.mode == 'full_att':
+            target_embds = img_embds
+
+        neg_sample = target_embds[0,:,torch.randint(0,target_embds.shape[2],(FLAGS.neg_per_ts,)),torch.randint(0,target_embds.shape[3],(FLAGS.neg_per_ts,))].detach()
+        self.temp_neg.append(F.normalize(neg_sample, dim=0))
+
+        cl_losses = []
+        for aug_img,crop_dims in zip(aug_imgs, dims):
+            aug_embds = self.cnn_forward(aug_img)
+            if FLAGS.aug_resize:
+                target_cropped_embds = self.cnn_crop_and_resize(target_embds,crop_dims,(crop_dims[3],crop_dims[2]))
+                aug_embds = F.interpolate(aug_embds,size=(crop_dims[3],crop_dims[2]),mode='bilinear',align_corners=True)
+            else:
+                target_cropped_embds = self.cnn_crop_and_resize(target_embds,crop_dims,(aug_embds.shape[2],aug_embds.shape[3]))
+
+            cl_losses.append(self.cnn_contrastive_loss(aug_embds,target_cropped_embds))
+
+        cl_loss = sum(cl_losses)/len(cl_losses)
 
         if FLAGS.plot:
-            segs = plot_embeddings(embds)
-            display_reconst_img(reconst_img,image,segs=segs)
+            #segs = plot_embeddings([embds])
+            #display_reconst_img(image,reconst_img,segs=segs)
 
-            segs = plot_embeddings(aug_embds)
-            display_reconst_img(aug_reconst,aug_img,segs=segs)
+            segs = plot_embeddings([embds,aug_embds])
+            display_reconst_img(aug_img,image,segs=segs)
 
-        target_embds = self.cnn_crop_and_resize(embds,dims,(aug_embds.shape[2],aug_embds.shape[3]))
-
-        cl_loss = self.cnn_contrastive_loss(aug_embds,target_embds)
-
-        img_reconst_loss = F.mse_loss(reconst_img, image)
-        aug_reconst_loss = F.mse_loss(aug_reconst, aug_img)
-        reconst_loss = img_reconst_loss + aug_reconst_loss
-
-        return cl_loss, reconst_loss, embds
+        return cl_loss, 0., img_embds, cl_losses
 
     def encoder(self, level):
         # A separate encoder (bottom-up net) is used for each level and shared among locations within each level (hence the use of 1x1 convolutions 
@@ -502,14 +515,17 @@ class GLOM(nn.Module):
                            .reshape(batch_size,embd_size,h,w,num_samples)
         return values
 
-    def attend_to_level(self, embeddings, level, ts=-1, ret_embds=False):
+    def attend_to_level(self, embeddings, level,num_samples=None, ts=-1, ret_embds=False):
         batch_size,embd_size,h,w = embeddings.shape
+
+        if num_samples is None:
+            num_samples = self.num_samples[level]
 
         # Implementation of the attention mechanism described on pg 13
         if ret_embds:
             values = self.sample_locations(embeddings, level, FLAGS.reg_samples)
         else:
-            values = self.sample_locations(embeddings, level, self.num_samples[level])
+            values = self.sample_locations(embeddings, level, num_samples)
 
         if FLAGS.l2_norm_att:
             sims = (F.normalize(values,dim=1) * F.normalize(embeddings.reshape(batch_size,embd_size,h,w,1),dim=1)).sum(1,keepdim=True)
@@ -533,11 +549,11 @@ class GLOM(nn.Module):
             weights = F.softmax(sims/self.att_temp[level], dim=4)
             return (values*weights).sum(4)
 
-    def add_spatial_attention(self, pred_embds, level, ts=-1, ret_att=False):
+    def add_spatial_attention(self, pred_embds, level, num_samples=None, ts=-1, ret_att=False):
         if level == 0:
             attention_embd = self.zero_tensor
         else:
-            attention_embd = self.attend_to_level(pred_embds, level, ts=ts)
+            attention_embd = self.attend_to_level(pred_embds, level, num_samples=num_samples, ts=ts)
 
         level_embd = (pred_embds + self.att_w[level]*attention_embd)/(1+self.att_w[level])
         if ret_att:

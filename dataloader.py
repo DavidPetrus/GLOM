@@ -79,15 +79,26 @@ class ADE20k_Dataset(torch.utils.data.Dataset):
         img_file = self.image_files[index]
 
         img = cv2.imread(img_file)[:,:,::-1]
+        h,w,_ = img.shape
+        aspect_ratio = h/w
+        if max(h,w) > 512:
+            if h > w:
+                img = cv2.resize(img, (int(512//aspect_ratio),512))
+            else:
+                img = cv2.resize(img, (512,int(aspect_ratio*512)))
+
         img = img[:img.shape[0]-img.shape[0]%8,:img.shape[1]-img.shape[1]%8]
-        img = img[:512,:512]
         img = torch.from_numpy(np.ascontiguousarray(img)).float()
         img = img.movedim(2,0)
 
-        aug, crop_dims = random_crop_resize(img)
-        img = normalize_image(img)
-        aug = normalize_image(aug)
-        img = self.color_aug(img)
-        aug = self.color_aug(aug)
+        augs = []
+        all_dims = []
+        for c in range(FLAGS.num_crops):
+            aug, crop_dims = random_crop_resize(img)
+            aug = normalize_image(aug)
+            augs.append(aug)
+            all_dims.append(crop_dims)
         
-        return img, aug, crop_dims
+        img = normalize_image(img)
+
+        return img, augs, all_dims

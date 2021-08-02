@@ -44,18 +44,15 @@ def mask_random_crop(image):
 
 def random_crop_resize(image):
     c,h,w = image.shape
-    aspect_ratio = h/w
 
-    c_h,c_w = int(h*FLAGS.crop_size)//8, int(w*FLAGS.crop_size)//8
-    if FLAGS.crop_size == 1.:
-        crop_x,crop_y = 0,0
-    else:
-        crop_x,crop_y = np.random.randint(0,w//8-c_w), np.random.randint(0,h//8-c_h)
-
+    crop_h,crop_w = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop,size=(2,))
+    c_h,c_w = int(h*crop_h)//8, int(w*crop_w)//8
+    crop_x,crop_y = np.random.randint(0,w//8-c_w), np.random.randint(0,h//8-c_h)
     crop = image[:,crop_y*8:crop_y*8+c_h*8, crop_x*8:crop_x*8+c_w*8]
 
-    t_size = (h,w) if w<512 else (int(512*aspect_ratio),512)
-    resized = F.interpolate(crop.unsqueeze(0),size=t_size,mode='bilinear',align_corners=True).squeeze(0)
+    resize_frac = np.random.uniform(FLAGS.min_resize,FLAGS.max_resize,size=(1,))[0]
+    t_size = (int(c_h*resize_frac),int(c_w*resize_frac))
+    resized = F.interpolate(crop.unsqueeze(0),size=(t_size[0]*8,t_size[1]*8),mode='bilinear',align_corners=True).squeeze(0)
 
     return resized, [crop_x,crop_y,c_w,c_h]
 
@@ -78,17 +75,20 @@ def calculate_vars(log_dict, level_embds, pca):
 
     return log_dict
 
-def display_reconst_img(reconst,frame,segs=None):
-    imshow = reconst[0].detach().movedim(0,2).cpu().numpy() * 255.
-    imshow = np.clip(imshow,0,255)
-    imshow = imshow.astype(np.uint8)
+def display_reconst_img(frame,reconst=None,segs=None,waitkey=False):
+    if reconst is not None:
+        imshow = reconst[0].detach().movedim(0,2).cpu().numpy() * 255.
+        imshow = np.clip(imshow,0,255)
+        imshow = imshow.astype(np.uint8)
+        cv2.imshow('pred',imshow[:,:,::-1])
+
     targ = frame[0].detach().movedim(0,2).cpu().numpy() * 255.
     targ = targ.astype(np.uint8)
-    cv2.imshow('pred',imshow)
-    cv2.imshow('target',targ)
+    cv2.imshow('target',targ[:,:,::-1])
     if segs is not None:
         for level,seg in enumerate(segs):
-            cv2.imshow('L{}'.format(level+1),seg)
+            cv2.imshow('L{}'.format(level+1),seg[:,:,::-1])
+
     key = cv2.waitKey(0)
     cv2.destroyAllWindows()
     if key==27:
@@ -96,7 +96,7 @@ def display_reconst_img(reconst,frame,segs=None):
 
 def find_clusters(log_dict, level_embds):
     start = time.time()
-    for dist_thresh in [0.05,0.1,0.2,0.3,0.5]:
+    for dist_thresh in [0.1,0.2,0.3,0.5]:
         agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,affinity='cosine',linkage='average')
         #for l_ix, embd_tensor in enumerate(level_embds):
         l_ix = 0
@@ -113,7 +113,7 @@ def find_clusters(log_dict, level_embds):
 def plot_embeddings(level_embds):
     global color
 
-    resize = [4,8,8,8,16]
+    resize = [8,8,8,8,16]
     segs = []
     agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=FLAGS.dist_thresh,affinity='cosine',linkage='average')
     for l_ix, embd_tensor in enumerate(level_embds):
