@@ -21,11 +21,12 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('dataset','ADE','ADE,JHMDB')
 flags.DEFINE_bool('plot',False,'')
-flags.DEFINE_float('dist_thresh',0.4,'')
-flags.DEFINE_string('root_dir','/home/petrus/JHMDB_dataset','')
+flags.DEFINE_float('dist_thresh',0.45,'')
+flags.DEFINE_string('root_dir','/home/petrus/','')
 flags.DEFINE_integer('batch_size',1,'')
+flags.DEFINE_integer('step_size',16,'')
 flags.DEFINE_bool('use_agc',False,'')
-flags.DEFINE_float('clip_grad',50.,'')
+flags.DEFINE_float('clip_grad',100.,'')
 flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_bool('only_reconst',False,'')
 flags.DEFINE_integer('skip_frames',2,'')
@@ -36,7 +37,7 @@ flags.DEFINE_integer('reconst_coeff',0,'')
 # Augmentations
 flags.DEFINE_float('min_crop',0.2,'Height/width size of crop')
 flags.DEFINE_float('max_crop',0.5,'Height/width size of crop')
-flags.DEFINE_integer('num_crops',2,'')
+flags.DEFINE_integer('num_crops',4,'')
 flags.DEFINE_bool('aug_resize',True,'')
 flags.DEFINE_float('min_resize',0.8,'Height/width size of resize')
 flags.DEFINE_float('max_resize',1.6,'Height/width size of resize')
@@ -48,15 +49,15 @@ flags.DEFINE_float('hue',0.2,'')
 flags.DEFINE_integer('jitter',0,'')
 
 # Contrastive learning flags
-flags.DEFINE_integer('num_neg_imgs',50,'')
-flags.DEFINE_integer('neg_per_ts',2,'')
-flags.DEFINE_integer('num_neg_ts',1,'')
+flags.DEFINE_integer('num_neg_imgs',16,'')
+flags.DEFINE_integer('neg_per_ts',200,'')
 flags.DEFINE_string('mode','full_att_nn','full_att_nn,full_att')
 flags.DEFINE_float('cl_temp',0.1,'')
 flags.DEFINE_bool('cl_symm',False,'')
 flags.DEFINE_bool('cl_sg',False,'')
+flags.DEFINE_float('mask_neg_thresh',0.,'')
+flags.DEFINE_float('margin',0.2,'')
 
-flags.DEFINE_float('margin',0.45,'')
 flags.DEFINE_bool('same_img_reg',True,'')
 flags.DEFINE_bool('td_bu_reg_own',False,'')
 flags.DEFINE_bool('td_bu_reg_aug',False,'')
@@ -85,6 +86,7 @@ flags.DEFINE_string('att_temp','same','')
 flags.DEFINE_integer('reg_samples',0,'')
 flags.DEFINE_string('att_weight','same','exp,linear,same')
 flags.DEFINE_float('att_t',0.2,'')
+flags.DEFINE_float('cl_att_t',0.1,'')
 flags.DEFINE_float('att_w',1.,'')
 flags.DEFINE_integer('att_samples',10,'')
 flags.DEFINE_integer('cl_samples',10,'')
@@ -92,9 +94,9 @@ flags.DEFINE_bool('l2_norm_att',True,'')
 flags.DEFINE_float('reg_temp_bank',0.01,'')
 flags.DEFINE_float('reg_temp_same',0.3,'')
 flags.DEFINE_string('reg_temp_mode','three','')
-flags.DEFINE_float('std_scale',3,'')
+flags.DEFINE_float('std_scale',2,'')
 
-flags.DEFINE_float('lr',0.0003,'Learning Rate')
+flags.DEFINE_float('lr',0.00003,'Learning Rate')
 flags.DEFINE_float('reg_coeff',1.,'Coefficient used for regularization loss')
 flags.DEFINE_float('cl_coeff',1.,'Coefficient used for contrastive loss')
 flags.DEFINE_bool('linear_input',True,'')
@@ -125,8 +127,12 @@ def main(argv):
     wandb.config.update(flags.FLAGS)
 
     if FLAGS.dataset == 'ADE':
-        all_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/work_place/*/*.jpg") + \
-                       glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
+        if FLAGS.root_dir == '/mnt/lustre/users/dvanniekerk1':
+            all_images = glob.glob(FLAGS.root_dir+"/ADE20K/work_place/*/*.jpg") + \
+                           glob.glob(FLAGS.root_dir+"/ADE20K/sports_and_leisure/*/*.jpg")
+        else:
+            all_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/work_place/*/*.jpg") + \
+                           glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
         train_images = all_images[:-300]
         val_images = all_images[-300:]
         print("Num train images:",len(train_images))
@@ -163,7 +169,7 @@ def main(argv):
     #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
     if FLAGS.plot:
-        model.load_state_dict(torch.load('weights/30July6.pt'))
+        model.load_state_dict(torch.load('weights/4Augustus1.pt'))
 
     if FLAGS.use_agc:
         optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
@@ -182,14 +188,16 @@ def main(argv):
     print((datetime.datetime.now()-start).total_seconds())
     min_loss = 100.
     total_loss = 0.
+    step_loss = 0.
     train_iter = 0
     for epoch in range(10000):
         model.train()
         model.val = False
         #model.flush_memory_bank()
+        # Set optimzer gradients to zero
+        optimizer.zero_grad()
         for frames_load in training_generator:
-            # Set optimzer gradients to zero
-            optimizer.zero_grad()
+            
 
             #frames = [frame.to('cuda') for frame in frames_load]
             image = frames_load[0].to('cuda')
@@ -238,10 +246,14 @@ def main(argv):
                 log_dict["CL_Loss_{}".format(crop_ix)] = cl_l
 
             if final_loss > 0.:
-                final_loss.backward()
-                if FLAGS.clip_grad > 0.:
-                    log_dict['grad_norm'] = torch.nn.utils.clip_grad_norm_(model.parameters(), FLAGS.clip_grad)
-                optimizer.step()
+                step_loss = step_loss + final_loss
+                if train_iter % FLAGS.step_size == 0:
+                    step_loss.backward()
+                    if FLAGS.clip_grad > 0.:
+                        log_dict['grad_norm'] = torch.nn.utils.clip_grad_norm_(model.parameters(), FLAGS.clip_grad)
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    step_loss = 0.
 
             if train_iter % 100 == 0:
                 print(log_dict)
@@ -249,14 +261,7 @@ def main(argv):
 
             wandb.log(log_dict)
 
-            if train_iter > 1000 and train_iter%100==0 and FLAGS.root_dir=='/home/petrus/JHMDB_dataset':
-                if final_loss < min_loss:
-                    torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
-                    min_loss = final_loss
-
-                #torch.save(model.input_cnn.state_dict(),'weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0]))
-                #torch.save(model.reconstruction_net.state_dict(),'weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0]))
-
+        optimizer.zero_grad()
         model.eval()
         model.val = True
         val_count = 0
@@ -267,7 +272,11 @@ def main(argv):
         for frames_load in validation_generator:
             with torch.no_grad():
                 image = frames_load[0].to('cuda')
-                aug_img = frames_load[1].to('cuda')
+                image = color_aug(image)
+                crop_imgs = []
+                for crop_img in frames_load[1]:
+                    crop_imgs.append(color_aug(crop_img.to('cuda')))
+
                 crop_dims = frames_load[2]
 
                 '''losses, logs, level_embds = model.forward_contrastive(image,aug_img,crop_dims)
@@ -281,10 +290,15 @@ def main(argv):
                 val_td_loss += td_loss
                 val_count += 1'''
 
-                cl_loss, reconst_loss, level_embds, cl_losses = model.cl_seg_forward(image, aug_img, crop_dims)
+                cl_loss, reconst_loss, level_embds, cl_losses = model.cl_seg_forward(image, crop_imgs, crop_dims)
                 val_cl_loss += cl_loss
                 val_reconstruction_loss += reconst_loss
                 val_count += 1
+
+        if FLAGS.root_dir!='/mnt/lustre/users/dvanniekerk1':
+            if val_cl_loss/val_count < min_loss:
+                torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
+                min_loss = val_cl_loss/val_count
 
         #log_dict = {"Epoch":epoch,"Val Reconstruction Loss": val_reconstruction_loss/val_count,
         #            "Val Contrastive Loss":val_cl_loss/val_count, "Val Bottom-Up Loss":val_bu_loss/val_count, "Val Top-Down Loss":val_td_loss/val_count}

@@ -169,6 +169,10 @@ class GLOM(nn.Module):
         self.norm_clip = [128**0.5,128**0.5,128**0.5,256**0.5,512**0.5]
 
         self.neg_cosine_sim = lambda x1,x2: -F.cosine_similarity(x1,x2)
+        self.soft_plus = nn.Softplus()
+        self.margin = FLAGS.margin
+        self.delta_p = 1 - FLAGS.margin
+        self.delta_n = FLAGS.margin
 
 
     def build_model(self):
@@ -228,11 +232,25 @@ class GLOM(nn.Module):
 
         pred_embd = pred_embd.permute(2,3,0,1)
         pos_sims = torch.matmul(pred_embd,level_embds.permute(2,3,1,0)).reshape(h*w,1)
-
         neg_sims = torch.matmul(pred_embd,self.neg_embds).reshape(h*w,-1)
-        all_sims = torch.cat([pos_sims,neg_sims],dim=1)
+        if FLAGS.mask_neg_thresh > 0.:
+            target_neg_sims = torch.matmul(level_embds.permute(2,3,0,1),self.neg_embds).reshape(h*w,-1)
+            mean_target_sim = target_neg_sims.mean(dim=1,keepdim=True)
+            max_target_sim = target_neg_sims.max(dim=1,keepdim=True)[0]
+            mask = (target_neg_sims <= ((max_target_sim-mean_target_sim)*FLAGS.mask_neg_thresh + mean_target_sim)).float()
+            neg_sims = neg_sims*mask.detach()
 
-        return F.cross_entropy(all_sims/FLAGS.cl_temp,self.sim_target[:all_sims.shape[0]])
+        #all_sims = torch.cat([pos_sims,neg_sims],dim=1)
+        #return F.cross_entropy(all_sims/FLAGS.cl_temp,self.sim_target[:all_sims.shape[0]])
+
+        # Circle Loss
+        ap = torch.clamp_min(- pos_sims.detach() + 1 + self.margin, min=0.)
+        an = torch.clamp_min(neg_sims.detach() + self.margin, min=0.)
+        logit_p = - ap * (pos_sims - self.delta_p) / FLAGS.cl_temp
+        logit_n = an * (neg_sims - self.delta_n) / FLAGS.cl_temp
+
+        loss = self.soft_plus(torch.logsumexp(logit_n, dim=1) + torch.logsumexp(logit_p, dim=1))
+        return loss.mean()
 
     def cnn_crop_and_resize(self, level_embds, dims, target_size):
         resized_embds = {}
@@ -261,10 +279,10 @@ class GLOM(nn.Module):
         return loss
 
     def cl_seg_forward(self, image, aug_imgs, dims):
-        if not self.bank_full and len(self.temp_neg) >= FLAGS.num_neg_imgs*FLAGS.neg_per_ts*2:
+        if not self.bank_full and len(self.temp_neg) >= FLAGS.num_neg_imgs:
             self.bank_full = True
 
-        if self.bank_full:
+        if self.bank_full and not self.val:
             self.neg_embds = torch.cat(self.temp_neg, dim=1)
             del self.temp_neg[:int(len(self.temp_neg)/FLAGS.num_neg_imgs)]
 
@@ -281,7 +299,8 @@ class GLOM(nn.Module):
             target_embds = img_embds
 
         neg_sample = target_embds[0,:,torch.randint(0,target_embds.shape[2],(FLAGS.neg_per_ts,)),torch.randint(0,target_embds.shape[3],(FLAGS.neg_per_ts,))].detach()
-        self.temp_neg.append(F.normalize(neg_sample, dim=0))
+        if not self.val:
+            self.temp_neg.append(F.normalize(neg_sample, dim=0))
 
         cl_losses = []
         for aug_img,crop_dims in zip(aug_imgs, dims):
@@ -297,11 +316,8 @@ class GLOM(nn.Module):
         cl_loss = sum(cl_losses)/len(cl_losses)
 
         if FLAGS.plot:
-            #segs = plot_embeddings([embds])
-            #display_reconst_img(image,reconst_img,segs=segs)
-
-            segs = plot_embeddings([embds,aug_embds])
-            display_reconst_img(aug_img,image,segs=segs)
+            segs = plot_embeddings([img_embds])
+            display_reconst_img(image,segs=segs)
 
         return cl_loss, 0., img_embds, cl_losses
 
@@ -520,6 +536,9 @@ class GLOM(nn.Module):
 
         if num_samples is None:
             num_samples = self.num_samples[level]
+            temp = self.att_temp[level]
+        else:
+            temp = FLAGS.cl_att_t
 
         # Implementation of the attention mechanism described on pg 13
         if ret_embds:
@@ -546,7 +565,7 @@ class GLOM(nn.Module):
 
             return max_embds.movedim(1,3), min_embds.movedim(1,3), patch_mask.movedim(1,3).squeeze(-1)
         else:
-            weights = F.softmax(sims/self.att_temp[level], dim=4)
+            weights = F.softmax(sims/temp, dim=4)
             return (values*weights).sum(4)
 
     def add_spatial_attention(self, pred_embds, level, num_samples=None, ts=-1, ret_att=False):
@@ -750,7 +769,7 @@ class GLOM(nn.Module):
         return reconst_img, level_embds, pred_embds, logs
 
     def forward_contrastive(self, image, aug_img, dims):
-        if not self.bank_full and len(self.temp_neg[-1]) >= FLAGS.num_neg_imgs*FLAGS.num_neg_ts*2:
+        if not self.bank_full and len(self.temp_neg[-1]) >= FLAGS.num_neg_imgs:
             self.bank_full = True
 
         if self.bank_full:

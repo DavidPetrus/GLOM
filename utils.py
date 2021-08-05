@@ -96,7 +96,7 @@ def display_reconst_img(frame,reconst=None,segs=None,waitkey=False):
 
 def find_clusters(log_dict, level_embds):
     start = time.time()
-    for dist_thresh in [0.1,0.2,0.3,0.5]:
+    for dist_thresh in [0.05,0.1,0.2,0.3,0.5]:
         agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,affinity='cosine',linkage='average')
         #for l_ix, embd_tensor in enumerate(level_embds):
         l_ix = 0
@@ -106,6 +106,13 @@ def find_clusters(log_dict, level_embds):
         embds = embds.reshape(l_h*l_w,-1)
         fitted = agglom_clust.fit(embds)
         log_dict['n_clusters/l{}_{}'.format(l_ix+1,dist_thresh)] = fitted.n_clusters_
+        clust_counts = np.unique(fitted.labels_,return_counts=True)[1]
+        clust_counts.sort()
+        if clust_counts.shape[0] > 3:
+            total_points = clust_counts.sum()
+            log_dict['n_clusters/1_freq'] = clust_counts[-1]/total_points
+            log_dict['n_clusters/2_freq'] = clust_counts[-2]/total_points
+            log_dict['n_clusters/3_freq'] = clust_counts[-3]/total_points
     
     print('Clustering Time:',time.time()-start)
     return log_dict
@@ -121,6 +128,7 @@ def plot_embeddings(level_embds):
         _,l_h,l_w,_ = embds.shape
         embds = embds.reshape(l_h*l_w,-1)
         fitted = agglom_clust.fit(embds)
+        print(fitted.n_clusters_)
         #clusters = np.moveaxis(fitted.labels_.reshape(l_h,l_w),0,1)
         clusters = fitted.labels_.reshape(l_h,l_w)
         seg = np.zeros([clusters.shape[0],clusters.shape[1],3],dtype=np.uint8)
