@@ -244,7 +244,7 @@ class GLOM(nn.Module):
         #return F.cross_entropy(all_sims/FLAGS.cl_temp,self.sim_target[:all_sims.shape[0]])
 
         # Circle Loss
-        ap = torch.clamp_min(- pos_sims.detach() + 1 + self.margin, min=0.)
+        ap = torch.clamp_min(-pos_sims.detach() + 1 + self.margin, min=0.)
         an = torch.clamp_min(neg_sims.detach() + self.margin, min=0.)
         logit_p = - ap * (pos_sims - self.delta_p) / FLAGS.cl_temp
         logit_n = an * (neg_sims - self.delta_n) / FLAGS.cl_temp
