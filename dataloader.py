@@ -63,42 +63,56 @@ class JHMDB_Dataset(torch.utils.data.Dataset):
 
 class ADE20k_Dataset(torch.utils.data.Dataset):
 
-  def __init__(self, image_files, granularity, labels=None):
+    def __init__(self, image_files, granularity, labels=None):
 
         #self.labels = labels
         self.image_files = image_files
         self.granularity = granularity
+        self.batch_size = FLAGS.batch_size
         self.color_aug = color_distortion(FLAGS.aug_strength*FLAGS.brightness, FLAGS.aug_strength*FLAGS.contrast, \
                                           FLAGS.aug_strength*FLAGS.saturation, FLAGS.aug_strength*FLAGS.hue)
 
-  def __len__(self):
-        return len(self.image_files)
+    def __len__(self):
+        return len(self.image_files)//self.batch_size
 
-  def __getitem__(self, index):
-        # Select sample
-        img_file = self.image_files[index]
-
-        img = cv2.imread(img_file)[:,:,::-1]
-        h,w,_ = img.shape
-        aspect_ratio = h/w
-        if max(h,w) > 512:
-            if h > w:
-                img = cv2.resize(img, (int(512//aspect_ratio),512))
-            else:
-                img = cv2.resize(img, (512,int(aspect_ratio*512)))
-
-        img = img[:img.shape[0]-img.shape[0]%8,:img.shape[1]-img.shape[1]%8]
-        img = torch.from_numpy(np.ascontiguousarray(img)).float()
-        img = img.movedim(2,0)
-
-        augs = []
-        all_dims = []
+    def __getitem__(self, index):
+        crop_props = []
         for c in range(FLAGS.num_crops):
-            aug, crop_dims = random_crop_resize(img)
-            aug = normalize_image(aug)
-            augs.append(aug)
-            all_dims.append(crop_dims)
-        
-        img = normalize_image(img)
+            crop_h = np.random.randint(FLAGS.min_crop//8,FLAGS.max_crop//8)
+            crop_w = np.random.randint(FLAGS.min_crop//8,FLAGS.max_crop//8)
+            resize_frac = np.random.uniform(FLAGS.min_resize,FLAGS.max_resize,size=(1,))[0]
+            t_size = (max(int(crop_h*resize_frac),FLAGS.min_crop//8),max(int(crop_w*resize_frac),FLAGS.min_crop//8))
+            crop_props.append(((crop_h,crop_w),t_size))
 
-        return img, augs, all_dims
+        img_batch = []
+        augs_batch = [[] for c in range(FLAGS.num_crops)]
+        all_dims = [[] for c in range(FLAGS.num_crops)]
+        for i in range(self.batch_size):
+            # Select sample
+            img_file = self.image_files[self.batch_size*index + i]
+
+            img = cv2.imread(img_file)[:,:,::-1]
+            h,w,_ = img.shape
+            aspect_ratio = h/w
+            if max(h,w) > 512:
+                if h > w:
+                    img = cv2.resize(img, (int(512//aspect_ratio),512))
+                else:
+                    img = cv2.resize(img, (512,int(aspect_ratio*512)))
+
+            img = img[:img.shape[0]-img.shape[0]%8,:img.shape[1]-img.shape[1]%8]
+            img = torch.from_numpy(np.ascontiguousarray(img)).float()
+            img = img.movedim(2,0)
+
+            for c in range(FLAGS.num_crops):
+                aug, crop_dims = random_crop_resize(img, crop_props[c][0], crop_props[c][1])
+                aug = normalize_image(aug)
+                augs_batch[c].append(aug)
+                all_dims[c].append(crop_dims)
+            
+            img = normalize_image(img)
+            img_batch.append(img.unsqueeze(0))
+
+        augs_batch = [torch.cat(augs_batch[c]) for c in range(FLAGS.num_crops)]
+
+        return img_batch, augs_batch, all_dims

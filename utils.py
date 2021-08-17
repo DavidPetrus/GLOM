@@ -42,23 +42,46 @@ def mask_random_crop(image):
     image[mask.bool()] = 0.5
     return image, mask.view(mask.shape[0],mask.shape[1],1)
 
-def random_crop_resize(image):
+def random_crop_resize(image, crop_size, t_size):
     c,h,w = image.shape
 
-    crop_h,crop_w = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop,size=(2,))
-    c_h,c_w = int(h*crop_h)//8, int(w*crop_w)//8
-    crop_x,crop_y = np.random.randint(0,w//8-c_w), np.random.randint(0,h//8-c_h)
+    #crop_h,crop_w = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop,size=(2,))
+    c_h,c_w = crop_size
+    crop_x,crop_y = np.random.randint(0,w//8-c_w+1), np.random.randint(0,h//8-c_h+1)
     crop = image[:,crop_y*8:crop_y*8+c_h*8, crop_x*8:crop_x*8+c_w*8]
 
-    resize_frac = np.random.uniform(FLAGS.min_resize,FLAGS.max_resize,size=(1,))[0]
-    t_size = (int(c_h*resize_frac),int(c_w*resize_frac))
-    resized = F.interpolate(crop.unsqueeze(0),size=(t_size[0]*8,t_size[1]*8),mode='bilinear',align_corners=True).squeeze(0)
+    #resize_frac = np.random.uniform(FLAGS.min_resize,FLAGS.max_resize,size=(1,))[0]
+    #t_size = (int(c_h*resize_frac),int(c_w*resize_frac))
+    resized = F.interpolate(crop.unsqueeze(0),size=(t_size[0]*8,t_size[1]*8),mode='bilinear',align_corners=True)
 
     return resized, [crop_x,crop_y,c_w,c_h]
 
 def color_distortion(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2):
     color_jitter = torchvision.transforms.ColorJitter(brightness,contrast,saturation,hue)
     return color_jitter
+
+
+def sinkhorn_knopp(sims):
+    Q = torch.exp(sims / FLAGS.epsilon).t() # Q is K-by-B for consistency with notations from our paper
+    B = Q.shape[1] # number of samples to assign
+    K = Q.shape[0] # how many prototypes
+
+    # make the matrix sum to 1
+    sum_Q = torch.sum(Q)
+    Q /= sum_Q
+
+    for it in range(FLAGS.sinkhorn_iters):
+        # normalize each row: total weight per prototype must be 1/K
+        sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+        Q /= sum_of_rows
+        Q /= K
+
+        # normalize each column: total weight per sample must be 1/B
+        Q /= torch.sum(Q, dim=0, keepdim=True)
+        Q /= B
+
+    Q *= B # the colomns must sum to 1 so that Q is an assignment
+    return Q.t()
 
 def calculate_vars(log_dict, level_embds, pca):
     for l_ix, embd_tensor in enumerate(level_embds):

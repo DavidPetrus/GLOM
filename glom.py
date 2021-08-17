@@ -9,7 +9,7 @@ import cv2
 import scipy.spatial.distance
 import scipy.stats
 
-from utils import display_reconst_img, plot_embeddings
+from utils import display_reconst_img, plot_embeddings, sinkhorn_knopp
 
 import warnings
 
@@ -42,10 +42,12 @@ class Sine(nn.Module):
 
 class GLOM(nn.Module):
 
-    def __init__(self, num_levels=5, embd_mult=16, granularity=[8,8,8,16,32], bottom_up_layers=3, fast_forward_layers=3, top_down_layers=3, num_input_layers=3, num_reconst=3):
+    def __init__(self, num_levels=5, embd_mult=16, granularity=[8,8,8,16,32], bottom_up_layers=3, fast_forward_layers=3, \
+                top_down_layers=3, num_input_layers=3, num_reconst=3):
         super(GLOM, self).__init__()
 
         self.val = False
+        self.batch_size = FLAGS.batch_size
 
         self.num_levels = num_levels
         self.granularity = granularity
@@ -196,6 +198,15 @@ class GLOM(nn.Module):
         self.seg_cnn = self.cnn()
         self.reconstruction_net = nn.Conv2d(128,192,kernel_size=1,stride=1)
 
+        self.prototypes = nn.Linear(128, FLAGS.num_prototypes, bias=False)
+        self.normalize_prototypes()
+
+    def normalize_prototypes(self):
+        with torch.set_grad_enabled(not FLAGS.sg_cluster_assign):
+            w = self.prototypes.weight.data.clone()
+            w = F.normalize(w, dim=1, p=2)
+            self.prototypes.weight.copy_(w)
+
     def cnn(self):
         cnn_channels = [3,32,32,32,32,64,64,64,64,128,128,128,128]
         strides = [1,2,1,1,2,1,1,1,2,1,1,1,1]
@@ -278,48 +289,72 @@ class GLOM(nn.Module):
 
         return loss
 
-    def cl_seg_forward(self, image, aug_imgs, dims):
-        if not self.bank_full and len(self.temp_neg) >= FLAGS.num_neg_imgs:
-            self.bank_full = True
+    def cl_seg_forward(self, image_batch, aug_batch, dims_batch):
+        self.normalize_prototypes()
+        full_img_embds, crop_img_embds = [],[]
+        for i in range(self.batch_size):
+            image = image_batch[i]
+            aug_imgs = [aug_batch[c][i:i+1] for c in range(len(aug_batch))]
+            dims = [dims_batch[c][i] for c in range(len(aug_batch))]
 
-        if self.bank_full and not self.val:
-            self.neg_embds = torch.cat(self.temp_neg, dim=1)
-            del self.temp_neg[:int(len(self.temp_neg)/FLAGS.num_neg_imgs)]
+            img_embds = self.cnn_forward(image)
+            for ts in range(FLAGS.timesteps):
+                if ts == FLAGS.timesteps-1:
+                    img_embds,att_embds = self.add_spatial_attention(img_embds,4,num_samples=FLAGS.cl_samples,ret_att=True)
+                else:
+                    img_embds,att_embds = self.add_spatial_attention(img_embds,4,ret_att=True)
 
-        img_embds = self.cnn_forward(image)
-        for ts in range(FLAGS.timesteps):
-            if ts == FLAGS.timesteps-1:
-                img_embds,att_embds = self.add_spatial_attention(img_embds,4,num_samples=FLAGS.cl_samples,ret_att=True)
-            else:
-                img_embds,att_embds = self.add_spatial_attention(img_embds,4,ret_att=True)
+            if FLAGS.mode == 'full_att_nn':
+                full_embds = att_embds
+            elif FLAGS.mode == 'full_att':
+                full_embds = img_embds
 
-        if FLAGS.mode == 'full_att_nn':
-            target_embds = att_embds
-        elif FLAGS.mode == 'full_att':
-            target_embds = img_embds
+            for aug_img,crop_dims in zip(aug_imgs, dims):
+                aug_embds = self.cnn_forward(aug_img)
+                if FLAGS.aug_resize:
+                    full_cropped_embds = self.cnn_crop_and_resize(full_embds,crop_dims,(crop_dims[3],crop_dims[2]))
+                    aug_embds = F.interpolate(aug_embds,size=(crop_dims[3],crop_dims[2]),mode='bilinear',align_corners=True)
+                else:
+                    full_cropped_embds = self.cnn_crop_and_resize(full_embds,crop_dims,(aug_embds.shape[2],aug_embds.shape[3]))
 
-        neg_sample = target_embds[0,:,torch.randint(0,target_embds.shape[2],(FLAGS.neg_per_ts,)),torch.randint(0,target_embds.shape[3],(FLAGS.neg_per_ts,))].detach()
-        if not self.val:
-            self.temp_neg.append(F.normalize(neg_sample, dim=0))
+                bs,c,h,w = full_cropped_embds.shape
+                full_img_embds.append(full_cropped_embds.movedim(1,3).reshape(h*w,c))
+                crop_img_embds.append(aug_embds.movedim(1,3).reshape(h*w,c))
 
-        cl_losses = []
-        for aug_img,crop_dims in zip(aug_imgs, dims):
-            aug_embds = self.cnn_forward(aug_img)
-            if FLAGS.aug_resize:
-                target_cropped_embds = self.cnn_crop_and_resize(target_embds,crop_dims,(crop_dims[3],crop_dims[2]))
-                aug_embds = F.interpolate(aug_embds,size=(crop_dims[3],crop_dims[2]),mode='bilinear',align_corners=True)
-            else:
-                target_cropped_embds = self.cnn_crop_and_resize(target_embds,crop_dims,(aug_embds.shape[2],aug_embds.shape[3]))
+            if FLAGS.plot:
+                segs = plot_embeddings([img_embds])
+                display_reconst_img(image,segs=segs)
 
-            cl_losses.append(self.cnn_contrastive_loss(aug_embds,target_cropped_embds))
+        full_img_embds = torch.cat(full_img_embds,dim=0)
+        crop_img_embds = torch.cat(crop_img_embds,dim=0)
+        cl_loss = self.swav_loss(full_img_embds,crop_img_embds)
 
-        cl_loss = sum(cl_losses)/len(cl_losses)
+        return cl_loss, 0., img_embds
 
-        if FLAGS.plot:
-            segs = plot_embeddings([img_embds])
-            display_reconst_img(image,segs=segs)
+    def swav_loss(self, full_img_embds, crop_img_embds):
+        # full_img_embds (B,128)
+        # crop_img_embds (B,128)
+        B,c = full_img_embds.shape
+        full_img_embds = F.normalize(full_img_embds,dim=1)
+        crop_img_embds = F.normalize(crop_img_embds,dim=1)
 
-        return cl_loss, 0., img_embds, cl_losses
+        full_sims = self.prototypes(full_img_embds)
+        crop_sims = self.prototypes(crop_img_embds)
+
+        # Calculate codes
+        if FLAGS.single_code_assign:
+            all_sims = torch.cat([full_sims,crop_sims])
+            with torch.set_grad_enabled(not FLAGS.sg_cluster_assign):
+                q = sinkhorn_knopp(all_sims)
+            loss = -(q[B:] * F.log_softmax(full_sims,dim=1)).sum(dim=1).mean() - (q[:B] * F.log_softmax(crop_sims,dim=1)).sum(dim=1).mean()
+        else:
+            with torch.set_grad_enabled(not FLAGS.sg_cluster_assign):
+                q_full = sinkhorn_knopp(full_sims)
+                q_crops = sinkhorn_knopp(crop_sims)
+            loss = -(q_full * F.log_softmax(crop_sims,dim=1)).sum(dim=1).mean() - (q_crops * F.log_softmax(full_sims,dim=1)).sum(dim=1).mean()
+
+        return loss
+
 
     def encoder(self, level):
         # A separate encoder (bottom-up net) is used for each level and shared among locations within each level (hence the use of 1x1 convolutions 

@@ -4,8 +4,6 @@ import torch
 import glob
 import datetime
 
-#from nfnets.agc import AGC
-
 from glom import GLOM
 from dataloader import JHMDB_Dataset, ADE20k_Dataset
 from utils import parse_logs, calculate_vars, find_clusters, plot_embeddings, parse_image_logs, color_distortion
@@ -21,10 +19,9 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('dataset','ADE','ADE,JHMDB')
 flags.DEFINE_bool('plot',False,'')
-flags.DEFINE_float('dist_thresh',0.45,'')
+flags.DEFINE_float('dist_thresh',0.4,'')
 flags.DEFINE_string('root_dir','/home/petrus/','')
-flags.DEFINE_integer('batch_size',1,'')
-flags.DEFINE_integer('step_size',16,'')
+flags.DEFINE_integer('batch_size',16,'')
 flags.DEFINE_bool('use_agc',False,'')
 flags.DEFINE_float('clip_grad',0.,'')
 flags.DEFINE_integer('num_workers',8,'')
@@ -34,9 +31,17 @@ flags.DEFINE_integer('frame_log',1,'')
 flags.DEFINE_string('layer_norm','none','out,separate,none,sub_mean,l2,l2_clip')
 flags.DEFINE_integer('reconst_coeff',0,'')
 
+# SwAV
+flags.DEFINE_integer('sinkhorn_iters',3,'')
+flags.DEFINE_float('epsilon',0.05,'')
+flags.DEFINE_integer('num_prototypes',300,'')
+flags.DEFINE_bool('single_code_assign',False,'')
+flags.DEFINE_bool('sg_cluster_assign',True,'')
+flags.DEFINE_integer('prototype_freeze_epochs',0,'')
+
 # Augmentations
-flags.DEFINE_float('min_crop',0.2,'Height/width size of crop')
-flags.DEFINE_float('max_crop',0.5,'Height/width size of crop')
+flags.DEFINE_integer('min_crop',40,'Height/width size of crop')
+flags.DEFINE_integer('max_crop',180,'Height/width size of crop')
 flags.DEFINE_integer('num_crops',4,'')
 flags.DEFINE_bool('aug_resize',True,'')
 flags.DEFINE_float('min_resize',0.8,'Height/width size of resize')
@@ -130,9 +135,13 @@ def main(argv):
         if FLAGS.root_dir == '/mnt/lustre/users/dvanniekerk1':
             all_images = glob.glob(FLAGS.root_dir+"/ADE20K/work_place/*/*.jpg") + \
                            glob.glob(FLAGS.root_dir+"/ADE20K/sports_and_leisure/*/*.jpg")
-        else:
+        elif FLAGS.root_dir == '/home/petrus/':
             all_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/work_place/*/*.jpg") + \
                            glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
+        else:
+            all_images = glob.glob("/home-mscluster/dvanniekerk/ADE/work_place/*/*.jpg") + \
+                           glob.glob("/home-mscluster/dvanniekerk/ADE/sports_and_leisure/*/*.jpg")
+
         train_images = all_images[:-300]
         val_images = all_images[-300:]
         print("Num train images:",len(train_images))
@@ -149,10 +158,10 @@ def main(argv):
 
     if FLAGS.dataset == 'ADE':
         training_set = ADE20k_Dataset(train_images, granularity)
-        training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+        training_generator = torch.utils.data.DataLoader(training_set, batch_size=None, shuffle=True, num_workers=FLAGS.num_workers)
 
         validation_set = ADE20k_Dataset(val_images, granularity)
-        validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+        validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=None, shuffle=True, num_workers=FLAGS.num_workers)
     elif FLAGS.dataset == 'JHMDB':
         training_set = JHMDB_Dataset(train_vids, granularity)
         training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
@@ -169,7 +178,7 @@ def main(argv):
     #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
     if FLAGS.plot:
-        model.load_state_dict(torch.load('weights/5August1.pt'))
+        model.load_state_dict(torch.load('weights/16August9.pt'))
 
     if FLAGS.use_agc:
         optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
@@ -197,14 +206,11 @@ def main(argv):
         # Set optimzer gradients to zero
         optimizer.zero_grad()
         for frames_load in training_generator:
-            
-
             #frames = [frame.to('cuda') for frame in frames_load]
-            image = frames_load[0].to('cuda')
-            image = color_aug(image)
+            images = [color_aug(img.to('cuda')) for img in frames_load[0]]
             crop_imgs = []
-            for crop_img in frames_load[1]:
-                crop_imgs.append(color_aug(crop_img.to('cuda')))
+            for crop_batch in frames_load[1]:
+                crop_imgs.append(color_aug(crop_batch.to('cuda')))
 
             crop_dims = frames_load[2]
 
@@ -237,25 +243,25 @@ def main(argv):
                 #log_dict = parse_logs(log_dict,logs)
                 log_dict = parse_image_logs(log_dict,logs)'''
 
-            cl_loss, reconst_loss, level_embds, cl_losses = model.cl_seg_forward(image, crop_imgs, crop_dims)
+            cl_loss, reconst_loss, level_embds = model.cl_seg_forward(images, crop_imgs, crop_dims)
             final_loss = FLAGS.reconst_coeff*reconst_loss + cl_loss
 
             train_iter += 1
             log_dict = {"Epoch":epoch,"Train Iteration":train_iter, "Final Loss": final_loss, "Reconstruction Loss": reconst_loss, "Contrastive Loss":cl_loss}
-            for crop_ix,cl_l in enumerate(cl_losses):
-                log_dict["CL_Loss_{}".format(crop_ix)] = cl_l
 
-            if final_loss > 0.:
-                step_loss = step_loss + final_loss
-                if train_iter % FLAGS.step_size == 0:
-                    step_loss.backward()
-                    if FLAGS.clip_grad > 0.:
-                        log_dict['grad_norm'] = torch.nn.utils.clip_grad_norm_(model.parameters(), FLAGS.clip_grad)
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    step_loss = 0.
+            final_loss.backward()
+            if FLAGS.clip_grad > 0.:
+                log_dict['grad_norm'] = torch.nn.utils.clip_grad_norm_(model.parameters(), FLAGS.clip_grad)
 
-            if train_iter % 100 == 0:
+            if epoch < FLAGS.prototype_freeze_epochs:
+                for name, p in model.named_parameters():
+                    if "prototypes" in name:
+                        p.grad = None
+
+            optimizer.step()
+            optimizer.zero_grad()
+
+            if train_iter % (100//FLAGS.batch_size) == 0:
                 print(log_dict)
                 log_dict = find_clusters(log_dict,level_embds)
 
@@ -290,12 +296,12 @@ def main(argv):
                 val_td_loss += td_loss
                 val_count += 1'''
 
-                cl_loss, reconst_loss, level_embds, cl_losses = model.cl_seg_forward(image, crop_imgs, crop_dims)
+                cl_loss, reconst_loss, level_embds = model.cl_seg_forward(image, crop_imgs, crop_dims)
                 val_cl_loss += cl_loss
                 val_reconstruction_loss += reconst_loss
                 val_count += 1
 
-        if FLAGS.root_dir!='/mnt/lustre/users/dvanniekerk1':
+        if FLAGS.root_dir != '/mnt/lustre/users/dvanniekerk1':
             if val_cl_loss/val_count < min_loss:
                 torch.save(model.state_dict(),'weights/{}.pt'.format(FLAGS.exp))
                 min_loss = val_cl_loss/val_count
