@@ -42,7 +42,7 @@ def mask_random_crop(image):
     image[mask.bool()] = 0.5
     return image, mask.view(mask.shape[0],mask.shape[1],1)
 
-def random_crop_resize(image, crop_size, t_size):
+'''def random_crop_resize(image, crop_size, t_size):
     c,h,w = image.shape
 
     #crop_h,crop_w = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop,size=(2,))
@@ -52,6 +52,20 @@ def random_crop_resize(image, crop_size, t_size):
 
     #resize_frac = np.random.uniform(FLAGS.min_resize,FLAGS.max_resize,size=(1,))[0]
     #t_size = (int(c_h*resize_frac),int(c_w*resize_frac))
+    resized = F.interpolate(crop.unsqueeze(0),size=(t_size[0]*8,t_size[1]*8),mode='bilinear',align_corners=True)
+
+    return resized, [crop_x,crop_y,c_w,c_h]'''
+
+def random_crop_resize(image):
+    c,h,w = image.shape
+
+    crop_h,crop_w = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop,size=(2,))
+    c_h,c_w = int(h*crop_h)//8, int(w*crop_w)//8
+    crop_x,crop_y = np.random.randint(0,w//8-c_w), np.random.randint(0,h//8-c_h)
+    crop = image[:,crop_y*8:crop_y*8+c_h*8, crop_x*8:crop_x*8+c_w*8]
+
+    resize_frac = np.random.uniform(FLAGS.min_resize,FLAGS.max_resize,size=(1,))[0]
+    t_size = (int(c_h*resize_frac),int(c_w*resize_frac))
     resized = F.interpolate(crop.unsqueeze(0),size=(t_size[0]*8,t_size[1]*8),mode='bilinear',align_corners=True)
 
     return resized, [crop_x,crop_y,c_w,c_h]

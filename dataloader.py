@@ -76,13 +76,13 @@ class ADE20k_Dataset(torch.utils.data.Dataset):
         return len(self.image_files)//self.batch_size
 
     def __getitem__(self, index):
-        crop_props = []
+        '''crop_props = []
         for c in range(FLAGS.num_crops):
             crop_h = np.random.randint(FLAGS.min_crop//8,FLAGS.max_crop//8)
             crop_w = np.random.randint(FLAGS.min_crop//8,FLAGS.max_crop//8)
             resize_frac = np.random.uniform(FLAGS.min_resize,FLAGS.max_resize,size=(1,))[0]
             t_size = (max(int(crop_h*resize_frac),FLAGS.min_crop//8),max(int(crop_w*resize_frac),FLAGS.min_crop//8))
-            crop_props.append(((crop_h,crop_w),t_size))
+            crop_props.append(((crop_h,crop_w),t_size))'''
 
         img_batch = []
         augs_batch = [[] for c in range(FLAGS.num_crops)]
@@ -105,14 +105,13 @@ class ADE20k_Dataset(torch.utils.data.Dataset):
             img = img.movedim(2,0)
 
             for c in range(FLAGS.num_crops):
-                aug, crop_dims = random_crop_resize(img, crop_props[c][0], crop_props[c][1])
+                #aug, crop_dims = random_crop_resize(img, crop_props[c][0], crop_props[c][1])
+                aug, crop_dims = random_crop_resize(img)
                 aug = normalize_image(aug)
                 augs_batch[c].append(aug)
                 all_dims[c].append(crop_dims)
             
             img = normalize_image(img)
             img_batch.append(img.unsqueeze(0))
-
-        augs_batch = [torch.cat(augs_batch[c]) for c in range(FLAGS.num_crops)]
 
         return img_batch, augs_batch, all_dims

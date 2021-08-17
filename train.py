@@ -23,8 +23,8 @@ flags.DEFINE_float('dist_thresh',0.4,'')
 flags.DEFINE_string('root_dir','/home/petrus/','')
 flags.DEFINE_integer('batch_size',16,'')
 flags.DEFINE_bool('use_agc',False,'')
-flags.DEFINE_float('clip_grad',0.,'')
-flags.DEFINE_integer('num_workers',8,'')
+flags.DEFINE_float('clip_grad',100.,'')
+flags.DEFINE_integer('num_workers',4,'')
 flags.DEFINE_bool('only_reconst',False,'')
 flags.DEFINE_integer('skip_frames',2,'')
 flags.DEFINE_integer('frame_log',1,'')
@@ -37,11 +37,11 @@ flags.DEFINE_float('epsilon',0.05,'')
 flags.DEFINE_integer('num_prototypes',300,'')
 flags.DEFINE_bool('single_code_assign',False,'')
 flags.DEFINE_bool('sg_cluster_assign',True,'')
-flags.DEFINE_integer('prototype_freeze_epochs',0,'')
+flags.DEFINE_integer('prototype_freeze_epochs',3,'')
 
 # Augmentations
-flags.DEFINE_integer('min_crop',40,'Height/width size of crop')
-flags.DEFINE_integer('max_crop',180,'Height/width size of crop')
+flags.DEFINE_float('min_crop',0.2,'Height/width size of crop')
+flags.DEFINE_float('max_crop',0.5,'Height/width size of crop')
 flags.DEFINE_integer('num_crops',4,'')
 flags.DEFINE_bool('aug_resize',True,'')
 flags.DEFINE_float('min_resize',0.8,'Height/width size of resize')
@@ -101,7 +101,7 @@ flags.DEFINE_float('reg_temp_same',0.3,'')
 flags.DEFINE_string('reg_temp_mode','three','')
 flags.DEFINE_float('std_scale',2,'')
 
-flags.DEFINE_float('lr',0.00001,'Learning Rate')
+flags.DEFINE_float('lr',0.001,'Learning Rate')
 flags.DEFINE_float('reg_coeff',1.,'Coefficient used for regularization loss')
 flags.DEFINE_float('cl_coeff',1.,'Coefficient used for contrastive loss')
 flags.DEFINE_bool('linear_input',True,'')
@@ -210,7 +210,7 @@ def main(argv):
             images = [color_aug(img.to('cuda')) for img in frames_load[0]]
             crop_imgs = []
             for crop_batch in frames_load[1]:
-                crop_imgs.append(color_aug(crop_batch.to('cuda')))
+                crop_imgs.append([color_aug(crop.to('cuda')) for crop in crop_batch])
 
             crop_dims = frames_load[2]
 
@@ -277,11 +277,10 @@ def main(argv):
         val_td_loss = 0.
         for frames_load in validation_generator:
             with torch.no_grad():
-                image = frames_load[0].to('cuda')
-                image = color_aug(image)
+                images = [color_aug(img.to('cuda')) for img in frames_load[0]]
                 crop_imgs = []
-                for crop_img in frames_load[1]:
-                    crop_imgs.append(color_aug(crop_img.to('cuda')))
+                for crop_batch in frames_load[1]:
+                    crop_imgs.append([color_aug(crop.to('cuda')) for crop in crop_batch])
 
                 crop_dims = frames_load[2]
 
@@ -296,7 +295,7 @@ def main(argv):
                 val_td_loss += td_loss
                 val_count += 1'''
 
-                cl_loss, reconst_loss, level_embds = model.cl_seg_forward(image, crop_imgs, crop_dims)
+                cl_loss, reconst_loss, level_embds = model.cl_seg_forward(images, crop_imgs, crop_dims)
                 val_cl_loss += cl_loss
                 val_reconstruction_loss += reconst_loss
                 val_count += 1

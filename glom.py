@@ -294,7 +294,7 @@ class GLOM(nn.Module):
         full_img_embds, crop_img_embds = [],[]
         for i in range(self.batch_size):
             image = image_batch[i]
-            aug_imgs = [aug_batch[c][i:i+1] for c in range(len(aug_batch))]
+            aug_imgs = [aug_batch[c][i] for c in range(len(aug_batch))]
             dims = [dims_batch[c][i] for c in range(len(aug_batch))]
 
             img_embds = self.cnn_forward(image)
