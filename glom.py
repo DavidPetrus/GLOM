@@ -202,7 +202,8 @@ class GLOM(nn.Module):
         self.normalize_prototypes()
 
     def normalize_prototypes(self):
-        with torch.set_grad_enabled(not FLAGS.sg_cluster_assign):
+        #with torch.set_grad_enabled(not FLAGS.sg_cluster_assign):
+        with torch.set_grad_enabled(False):
             w = self.prototypes.weight.data.clone()
             w = F.normalize(w, dim=1, p=2)
             self.prototypes.weight.copy_(w)
@@ -322,7 +323,7 @@ class GLOM(nn.Module):
                 crop_img_embds.append(aug_embds.movedim(1,3).reshape(h*w,c))
 
             if FLAGS.plot:
-                segs = plot_embeddings([img_embds])
+                segs = plot_embeddings([img_embds],self.prototypes)
                 display_reconst_img(image,segs=segs)
 
         full_img_embds = torch.cat(full_img_embds,dim=0)
@@ -346,12 +347,14 @@ class GLOM(nn.Module):
             all_sims = torch.cat([full_sims,crop_sims])
             with torch.set_grad_enabled(not FLAGS.sg_cluster_assign):
                 q = sinkhorn_knopp(all_sims)
-            loss = -(q[B:] * F.log_softmax(full_sims,dim=1)).sum(dim=1).mean() - (q[:B] * F.log_softmax(crop_sims,dim=1)).sum(dim=1).mean()
+            loss = -(q[B:] * F.log_softmax(full_sims/FLAGS.cl_temp,dim=1)).sum(dim=1).mean() - \
+                   (q[:B] * F.log_softmax(crop_sims/FLAGS.cl_temp,dim=1)).sum(dim=1).mean()
         else:
             with torch.set_grad_enabled(not FLAGS.sg_cluster_assign):
                 q_full = sinkhorn_knopp(full_sims)
                 q_crops = sinkhorn_knopp(crop_sims)
-            loss = -(q_full * F.log_softmax(crop_sims,dim=1)).sum(dim=1).mean() - (q_crops * F.log_softmax(full_sims,dim=1)).sum(dim=1).mean()
+            loss = -(q_full * F.log_softmax(crop_sims/FLAGS.cl_temp,dim=1)).sum(dim=1).mean() - \
+                   (q_crops * F.log_softmax(full_sims/FLAGS.cl_temp,dim=1)).sum(dim=1).mean()
 
         return loss
 

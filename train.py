@@ -3,6 +3,7 @@ import cv2
 import torch
 import glob
 import datetime
+import random
 
 from glom import GLOM
 from dataloader import JHMDB_Dataset, ADE20k_Dataset
@@ -17,11 +18,11 @@ from absl import flags, app
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('exp','test','')
-flags.DEFINE_string('dataset','ADE','ADE,JHMDB')
+flags.DEFINE_string('dataset','JHMDB','ADE,JHMDB')
 flags.DEFINE_bool('plot',False,'')
 flags.DEFINE_float('dist_thresh',0.4,'')
 flags.DEFINE_string('root_dir','/home/petrus/','')
-flags.DEFINE_integer('batch_size',16,'')
+flags.DEFINE_integer('batch_size',32,'')
 flags.DEFINE_bool('use_agc',False,'')
 flags.DEFINE_float('clip_grad',100.,'')
 flags.DEFINE_integer('num_workers',4,'')
@@ -34,7 +35,8 @@ flags.DEFINE_integer('reconst_coeff',0,'')
 # SwAV
 flags.DEFINE_integer('sinkhorn_iters',3,'')
 flags.DEFINE_float('epsilon',0.05,'')
-flags.DEFINE_integer('num_prototypes',300,'')
+flags.DEFINE_integer('num_prototypes',10,'')
+flags.DEFINE_bool('round_q',True,'')
 flags.DEFINE_bool('single_code_assign',False,'')
 flags.DEFINE_bool('sg_cluster_assign',True,'')
 flags.DEFINE_integer('prototype_freeze_epochs',3,'')
@@ -46,7 +48,7 @@ flags.DEFINE_integer('num_crops',4,'')
 flags.DEFINE_bool('aug_resize',True,'')
 flags.DEFINE_float('min_resize',0.8,'Height/width size of resize')
 flags.DEFINE_float('max_resize',1.6,'Height/width size of resize')
-flags.DEFINE_float('aug_strength',0.5,'')
+flags.DEFINE_float('aug_strength',0.7,'')
 flags.DEFINE_float('brightness',0.8,'')
 flags.DEFINE_float('contrast',0.8,'')
 flags.DEFINE_float('saturation',0.8,'')
@@ -93,13 +95,13 @@ flags.DEFINE_string('att_weight','same','exp,linear,same')
 flags.DEFINE_float('att_t',0.2,'')
 flags.DEFINE_float('cl_att_t',0.2,'')
 flags.DEFINE_float('att_w',1.,'')
-flags.DEFINE_integer('att_samples',20,'')
-flags.DEFINE_integer('cl_samples',20,'')
+flags.DEFINE_integer('att_samples',10,'')
+flags.DEFINE_integer('cl_samples',10,'')
 flags.DEFINE_bool('l2_norm_att',True,'')
 flags.DEFINE_float('reg_temp_bank',0.01,'')
 flags.DEFINE_float('reg_temp_same',0.3,'')
 flags.DEFINE_string('reg_temp_mode','three','')
-flags.DEFINE_float('std_scale',2,'')
+flags.DEFINE_float('std_scale',4,'')
 
 flags.DEFINE_float('lr',0.001,'Learning Rate')
 flags.DEFINE_float('reg_coeff',1.,'Coefficient used for regularization loss')
@@ -131,23 +133,31 @@ def main(argv):
     wandb.save("utils.py")
     wandb.config.update(flags.FLAGS)
 
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = True
+
     if FLAGS.dataset == 'ADE':
         if FLAGS.root_dir == '/mnt/lustre/users/dvanniekerk1':
-            all_images = glob.glob(FLAGS.root_dir+"/ADE20K/work_place/*/*.jpg") + \
-                           glob.glob(FLAGS.root_dir+"/ADE20K/sports_and_leisure/*/*.jpg")
+            #all_images = glob.glob(FLAGS.root_dir+"/ADE20K/work_place/*/*.jpg") + \
+            #               glob.glob(FLAGS.root_dir+"/ADE20K/sports_and_leisure/*/*.jpg")
+            all_images = glob.glob(FLAGS.root_dir+"/ADE20K/work_place/staircase/*.jpg")
         elif FLAGS.root_dir == '/home/petrus/':
-            all_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/work_place/*/*.jpg") + \
-                           glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
+            #all_images = glob.glob("/home/petrus/ADE20K/images/ADE/training/work_place/*/*.jpg") + \
+            #               glob.glob("/home/petrus/ADE20K/images/ADE/training/sports_and_leisure/*/*.jpg")
+            all_images = glob.glob(FLAGS.root_dir+"/ADE20K/images/ADE/training/work_place/staircase/*.jpg")
         else:
-            all_images = glob.glob("/home-mscluster/dvanniekerk/ADE/work_place/*/*.jpg") + \
-                           glob.glob("/home-mscluster/dvanniekerk/ADE/sports_and_leisure/*/*.jpg")
+            #all_images = glob.glob("/home-mscluster/dvanniekerk/ADE/work_place/*/*.jpg") + \
+            #               glob.glob("/home-mscluster/dvanniekerk/ADE/sports_and_leisure/*/*.jpg")
+            all_images = glob.glob(FLAGS.root_dir+"/ADE/work_place/staircase/*.jpg")
 
-        train_images = all_images[:-300]
-        val_images = all_images[-300:]
+        random.shuffle(all_images)
+        train_images = all_images[:-16]
+        val_images = all_images[-16:]
         print("Num train images:",len(train_images))
         print("Num val images:",len(val_images))
     elif FLAGS.dataset == 'JHMDB':
-        all_vids = glob.glob(FLAGS.root_dir+"/JHMDB_video/ReCompress_Videos/*/*")
+        all_vids = glob.glob(FLAGS.root_dir+"/JHMDB_dataset/JHMDB_video/ReCompress_Videos/*/*")
+        random.shuffle(all_vids)
         train_vids = all_vids[:800]
         validation_vids = all_vids[800:]
 
@@ -164,10 +174,10 @@ def main(argv):
         validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=None, shuffle=True, num_workers=FLAGS.num_workers)
     elif FLAGS.dataset == 'JHMDB':
         training_set = JHMDB_Dataset(train_vids, granularity)
-        training_generator = torch.utils.data.DataLoader(training_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+        training_generator = torch.utils.data.DataLoader(training_set, batch_size=None, shuffle=True, num_workers=FLAGS.num_workers)
 
         validation_set = JHMDB_Dataset(validation_vids, granularity)
-        validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=FLAGS.batch_size, shuffle=True, num_workers=FLAGS.num_workers)
+        validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=None, shuffle=True, num_workers=FLAGS.num_workers)
 
     color_aug = color_distortion(FLAGS.aug_strength*FLAGS.brightness, FLAGS.aug_strength*FLAGS.contrast, \
                                           FLAGS.aug_strength*FLAGS.saturation, FLAGS.aug_strength*FLAGS.hue)
@@ -178,7 +188,10 @@ def main(argv):
     #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
     if FLAGS.plot:
-        model.load_state_dict(torch.load('weights/16August9.pt'))
+        model.load_state_dict(torch.load('weights/21Sep2.pt'))
+        FLAGS.lr = 0.
+
+    model.to('cuda')
 
     if FLAGS.use_agc:
         optimizer = torch.optim.SGD(params=model.parameters(),lr=FLAGS.lr)
@@ -189,8 +202,6 @@ def main(argv):
     if not FLAGS.train_reconst:
         for par in model.reconstruction_net.parameters():
             par.requires_grad = False
-
-    model.to('cuda')
 
     #torch.autograd.set_detect_anomaly(True)
 
@@ -258,12 +269,13 @@ def main(argv):
                     if "prototypes" in name:
                         p.grad = None
 
-            optimizer.step()
-            optimizer.zero_grad()
-
             if train_iter % (100//FLAGS.batch_size) == 0:
                 print(log_dict)
-                log_dict = find_clusters(log_dict,level_embds)
+                with torch.no_grad():
+                    log_dict = find_clusters(log_dict,level_embds,model.prototypes)
+
+            optimizer.step()
+            optimizer.zero_grad()
 
             wandb.log(log_dict)
 

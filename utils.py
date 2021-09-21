@@ -82,19 +82,25 @@ def sinkhorn_knopp(sims):
 
     # make the matrix sum to 1
     sum_Q = torch.sum(Q)
-    Q /= sum_Q
+    Q = Q/sum_Q
 
     for it in range(FLAGS.sinkhorn_iters):
         # normalize each row: total weight per prototype must be 1/K
         sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
-        Q /= sum_of_rows
-        Q /= K
+        Q = Q/sum_of_rows
+        Q = Q/K
 
         # normalize each column: total weight per sample must be 1/B
-        Q /= torch.sum(Q, dim=0, keepdim=True)
-        Q /= B
+        Q = Q/torch.sum(Q, dim=0, keepdim=True)
+        Q = Q/B
 
-    Q *= B # the colomns must sum to 1 so that Q is an assignment
+    if FLAGS.round_q:
+        max_proto_sim,_ = Q.max(dim=0)
+        Q[Q != max_proto_sim] = 0.
+        Q[Q == max_proto_sim] = 1.
+    else:
+        Q = Q*B # the columns must sum to 1 so that Q is an assignment
+
     return Q.t()
 
 def calculate_vars(log_dict, level_embds, pca):
@@ -131,8 +137,8 @@ def display_reconst_img(frame,reconst=None,segs=None,waitkey=False):
     if key==27:
         exit()
 
-def find_clusters(log_dict, level_embds):
-    start = time.time()
+def find_clusters(log_dict, level_embds, prototypes):
+    '''start = time.time()
     for dist_thresh in [0.05,0.1,0.2,0.3,0.5]:
         agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,affinity='cosine',linkage='average')
         #for l_ix, embd_tensor in enumerate(level_embds):
@@ -151,23 +157,51 @@ def find_clusters(log_dict, level_embds):
             log_dict['n_clusters/2_freq'] = clust_counts[-2]/total_points
             log_dict['n_clusters/3_freq'] = clust_counts[-3]/total_points
     
-    print('Clustering Time:',time.time()-start)
+    print('Clustering Time:',time.time()-start)'''
+
+    #for l_ix, embd_tensor in enumerate(level_embds):
+    l_ix = 0
+    embd_tensor = level_embds
+    embds = embd_tensor.detach().movedim(1,3)
+    _,l_h,l_w,_ = embds.shape
+    embds = embds.reshape(l_h*l_w,-1)
+    embds = F.normalize(embds,dim=1)
+    sims = prototypes(embds)
+
+    clust_sims,clusters = sims.max(dim=1)
+
+    _,clust_counts = torch.unique(clusters, return_counts=True)
+    sorted_counts,_ = torch.sort(clust_counts,descending=True)
+    total_points = sorted_counts.sum()
+
+    log_dict['n_clusters/mean_sim'] = clust_sims.mean()
+    log_dict['n_clusters/std_sim'] = clust_sims.std()
+    log_dict['n_clusters/num_clusts'] = sorted_counts.shape[0]
+    log_dict['n_clusters/min_freq'] = sorted_counts[-1]/total_points
+
+    if sorted_counts.shape[0] >= 3:
+        log_dict['n_clusters/1_freq'] = sorted_counts[0]/total_points
+        log_dict['n_clusters/2_freq'] = sorted_counts[1]/total_points
+        log_dict['n_clusters/3_freq'] = sorted_counts[2]/total_points
+
     return log_dict
 
-def plot_embeddings(level_embds):
+def plot_embeddings(level_embds,prototypes):
     global color
 
     resize = [8,8,8,8,16]
     segs = []
-    agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=FLAGS.dist_thresh,affinity='cosine',linkage='average')
+
     for l_ix, embd_tensor in enumerate(level_embds):
-        embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
+        embds = embd_tensor.detach().movedim(1,3)
         _,l_h,l_w,_ = embds.shape
         embds = embds.reshape(l_h*l_w,-1)
-        fitted = agglom_clust.fit(embds)
-        print(fitted.n_clusters_)
-        #clusters = np.moveaxis(fitted.labels_.reshape(l_h,l_w),0,1)
-        clusters = fitted.labels_.reshape(l_h,l_w)
+
+        embds = F.normalize(embds,dim=1)
+        sims = prototypes(embds)
+        clusters = sims.argmax(dim=1)
+        clusters = clusters.reshape(l_h,l_w).cpu().numpy()
+
         seg = np.zeros([clusters.shape[0],clusters.shape[1],3],dtype=np.uint8)
         for c in range(clusters.max()+1):
             seg[clusters==c] = color[c]
