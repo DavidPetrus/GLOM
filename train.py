@@ -35,15 +35,16 @@ flags.DEFINE_integer('reconst_coeff',0,'')
 # SwAV
 flags.DEFINE_integer('sinkhorn_iters',3,'')
 flags.DEFINE_float('epsilon',0.05,'')
-flags.DEFINE_integer('num_prototypes',10,'')
+flags.DEFINE_integer('num_prototypes',5,'')
 flags.DEFINE_bool('round_q',True,'')
 flags.DEFINE_bool('single_code_assign',False,'')
 flags.DEFINE_bool('sg_cluster_assign',True,'')
 flags.DEFINE_integer('prototype_freeze_epochs',3,'')
 
 # Augmentations
-flags.DEFINE_float('min_crop',0.2,'Height/width size of crop')
-flags.DEFINE_float('max_crop',0.5,'Height/width size of crop')
+flags.DEFINE_bool('att_crops',True,'')
+flags.DEFINE_float('min_crop',0.3,'Height/width size of crop')
+flags.DEFINE_float('max_crop',0.6,'Height/width size of crop')
 flags.DEFINE_integer('num_crops',4,'')
 flags.DEFINE_bool('aug_resize',True,'')
 flags.DEFINE_float('min_resize',0.8,'Height/width size of resize')
@@ -84,7 +85,7 @@ flags.DEFINE_float('ff_reg',0.,'')
 
 # Timestep update flags
 flags.DEFINE_string('sim','none','none, sm_sim')
-flags.DEFINE_integer('timesteps',3,'Number of timesteps')
+flags.DEFINE_integer('timesteps',5,'Number of timesteps')
 flags.DEFINE_float('prev_weight',2.,'')
 flags.DEFINE_string('weighting','one','')
 
@@ -93,10 +94,8 @@ flags.DEFINE_string('att_temp','same','')
 flags.DEFINE_integer('reg_samples',0,'')
 flags.DEFINE_string('att_weight','same','exp,linear,same')
 flags.DEFINE_float('att_t',0.2,'')
-flags.DEFINE_float('cl_att_t',0.2,'')
-flags.DEFINE_float('att_w',1.,'')
+flags.DEFINE_float('att_w',0.5,'')
 flags.DEFINE_integer('att_samples',10,'')
-flags.DEFINE_integer('cl_samples',10,'')
 flags.DEFINE_bool('l2_norm_att',True,'')
 flags.DEFINE_float('reg_temp_bank',0.01,'')
 flags.DEFINE_float('reg_temp_same',0.3,'')
@@ -121,6 +120,8 @@ flags.DEFINE_integer('bottom_up_layers',3,'Number of layers for Bottom-Up networ
 flags.DEFINE_integer('top_down_layers',3,'Number of layers for Top-Down network')
 flags.DEFINE_integer('input_cnn_depth',3,'Number of convolutional layers for input CNN')
 flags.DEFINE_integer('num_reconst',3,'Number of layers for reconstruction CNN')
+
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 
 def main(argv):
@@ -188,7 +189,7 @@ def main(argv):
     #model.input_cnn.load_state_dict(torch.load('weights/input_cnn_{}_{}.pt'.format(FLAGS.linear_input,FLAGS.embd_mult*granularity[0])))
     #model.reconstruction_net.load_state_dict(torch.load('weights/reconstruction_net_{}_{}.pt'.format(FLAGS.linear_reconst,FLAGS.embd_mult*granularity[0])))
     if FLAGS.plot:
-        model.load_state_dict(torch.load('weights/21Sep2.pt'))
+        model.load_state_dict(torch.load('weights/21Sept1.pt'))
         FLAGS.lr = 0.
 
     model.to('cuda')

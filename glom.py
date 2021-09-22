@@ -300,10 +300,7 @@ class GLOM(nn.Module):
 
             img_embds = self.cnn_forward(image)
             for ts in range(FLAGS.timesteps):
-                if ts == FLAGS.timesteps-1:
-                    img_embds,att_embds = self.add_spatial_attention(img_embds,4,num_samples=FLAGS.cl_samples,ret_att=True)
-                else:
-                    img_embds,att_embds = self.add_spatial_attention(img_embds,4,ret_att=True)
+                img_embds,att_embds = self.add_spatial_attention(img_embds,4,ret_att=True)
 
             if FLAGS.mode == 'full_att_nn':
                 full_embds = att_embds
@@ -312,6 +309,12 @@ class GLOM(nn.Module):
 
             for aug_img,crop_dims in zip(aug_imgs, dims):
                 aug_embds = self.cnn_forward(aug_img)
+                if FLAGS.att_crops:
+                    for ts in range(FLAGS.timesteps):
+                        aug_embds,att_embds = self.add_spatial_attention(aug_embds,4,ret_att=True)
+
+                    aug_embds = att_embds
+
                 if FLAGS.aug_resize:
                     full_cropped_embds = self.cnn_crop_and_resize(full_embds,crop_dims,(crop_dims[3],crop_dims[2]))
                     aug_embds = F.interpolate(aug_embds,size=(crop_dims[3],crop_dims[2]),mode='bilinear',align_corners=True)
@@ -569,14 +572,11 @@ class GLOM(nn.Module):
                            .reshape(batch_size,embd_size,h,w,num_samples)
         return values
 
-    def attend_to_level(self, embeddings, level,num_samples=None, ts=-1, ret_embds=False):
+    def attend_to_level(self, embeddings, level, ts=-1, ret_embds=False):
         batch_size,embd_size,h,w = embeddings.shape
 
-        if num_samples is None:
-            num_samples = self.num_samples[level]
-            temp = self.att_temp[level]
-        else:
-            temp = FLAGS.cl_att_t
+        num_samples = self.num_samples[level]
+        temp = self.att_temp[level]
 
         # Implementation of the attention mechanism described on pg 13
         if ret_embds:
@@ -606,11 +606,11 @@ class GLOM(nn.Module):
             weights = F.softmax(sims/temp, dim=4)
             return (values*weights).sum(4)
 
-    def add_spatial_attention(self, pred_embds, level, num_samples=None, ts=-1, ret_att=False):
+    def add_spatial_attention(self, pred_embds, level, ts=-1, ret_att=False):
         if level == 0:
             attention_embd = self.zero_tensor
         else:
-            attention_embd = self.attend_to_level(pred_embds, level, num_samples=num_samples, ts=ts)
+            attention_embd = self.attend_to_level(pred_embds, level, ts=ts)
 
         level_embd = (pred_embds + self.att_w[level]*attention_embd)/(1+self.att_w[level])
         if ret_att:
